@@ -1,4 +1,4 @@
-const CACHE_NAME = 'yunako-hub-shell-v1';
+const CACHE_NAME = 'yunako-hub-shell-v2';
 const STATIC_ASSETS = [
   './',
   './index.html',
@@ -6,39 +6,31 @@ const STATIC_ASSETS = [
   './manifest.json'
 ];
 
-self.addEventListener('install', function(event) {
+self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(function(cache) {
-      return cache.addAll(STATIC_ASSETS);
-    })
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS))
   );
   self.skipWaiting();
 });
 
-self.addEventListener('activate', function(event) {
+self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then(function(keys) {
-      return Promise.all(
-        keys.filter(function(k) { return k !== CACHE_NAME; }).map(function(k) { return caches.delete(k); })
-      );
-    })
+    caches.keys().then((keys) =>
+      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
+    )
   );
   self.clients.claim();
 });
 
-self.addEventListener('fetch', function(event) {
-  // Jangan pernah men-cache request API POST ke Google Apps Script
-  if (event.request.method !== 'GET') {
-    return;
-  }
-
+self.addEventListener('fetch', (event) => {
+  if (event.request.method !== 'GET') return;
   event.respondWith(
     fetch(event.request)
-      .then(function(networkResponse) {
-        return networkResponse;
+      .then((res) => {
+        const copy = res.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        return res;
       })
-      .catch(function() {
-        return caches.match(event.request);
-      })
+      .catch(() => caches.match(event.request))
   );
 });
