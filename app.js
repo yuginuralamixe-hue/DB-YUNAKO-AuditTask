@@ -6,7 +6,7 @@
  */
 
 // GANTI URL DI BAWAH INI DENGAN URL WEB APP GOOGLE APPS SCRIPT ANDA (.../exec)
-const GAS_WEB_APP_URL = 'PASTE_YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE';
+const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbx0mlXgYPulfBSUajkdR2zlzzce1MUlCcawzBf8Ize6PwP-PoyaxDkBYjYAbk5JNiU/exec';
 
 // State Aplikasi di Memori Browser (Tanpa localStorage / sessionStorage / IndexedDB)
 const AppState = {
