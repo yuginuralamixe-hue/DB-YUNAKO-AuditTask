@@ -1,0 +1,24 @@
+{
+  "name": "YUNAKO Audit & Task Hub",
+  "short_name": "YUNAKO Hub",
+  "description": "Aplikasi Manajemen Tugas, Jadwal & Eksekusi Checklist Audit Lapangan by Yugi Nuralam Khoirulloh",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F8FAFC",
+  "theme_color": "#1E3A8A",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/942/942748.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/942/942748.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
