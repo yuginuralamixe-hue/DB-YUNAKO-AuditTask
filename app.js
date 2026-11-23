@@ -1,1653 +1,121 @@
 /**
  * ============================================================================
- * YUNAKO AUDIT & TASK HUB - FRONTEND CONTROLLER (v2.0 - +Activity Trial Report)
- * Author: Yugi Nuralam Khoirulloh
+ * YUNAKO AUDIT & TASK HUB - APP.JS (UPDATED WITH ACTIVITY TRIAL REPORT)
+ * Frontend PWA Controller (In-Memory State, GAS API Client, Image Compressor)
  * ============================================================================
  */
 
+// GANTI URL DI BAWAH INI DENGAN URL WEB APP GOOGLE APPS SCRIPT ANDA (.../exec)
 const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbx0mlXgYPulfBSUajkdR2zlzzce1MUlCcawzBf8Ize6PwP-PoyaxDkBYjYAbk5JNiU/exec';
 
-const STATE = {
+// State Aplikasi di Memori Browser (Tanpa localStorage / sessionStorage / IndexedDB)
+const AppState = {
+  token: null,
   user: null,
   currentRoute: 'dashboard',
-  activeAuditId: null,
-  activeTrialId: null,
-  trialFilter: 'ALL',
-  trialFlowDraft: [],
-  trialPhotoData: null,
-  data: {
-    users: [],
-    schedules: [],
-    tasks: [],
-    audits: [],
-    checklistItems: [],
-    capas: [],
-    trialReports: [],
-    notifications: []
-  },
-  isLoading: false
+  usersList: [],
+  schedules: [],
+  scheduleViewMode: 'list',
+  scheduleCategoryFilter: 'ALL',
+  tasks: [],
+  taskStatusFilter: 'ALL',
+  templates: [],
+  auditSessions: [],
+  auditFilter: 'ALL',
+  activeAuditDetail: null,
+  // State Modul Activity Trial Report
+  trialReports: [],
+  trialFlowSteps: [],
+  trialExistingPhotoUrl: '',
+  trialPendingPhotoBase64: null
 };
 
 /* ============================================================================
- * 1. INITIALIZATION & THEME
+ * 1. INISIALISASI & SERVICE WORKER PWA
  * ============================================================================ */
 
-document.addEventListener('DOMContentLoaded', () => {
-  initTheme();
-  bindGlobalEvents();
-  checkExistingSession();
+document.addEventListener('DOMContentLoaded', function() {
   lucide.createIcons();
-});
 
-function initTheme() {
-  const savedTheme = localStorage.getItem('yunako_theme');
-  if (savedTheme === 'dark' || (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-    document.documentElement.classList.add('dark');
+  if (GAS_WEB_APP_URL.indexOf('PASTE_YOUR') > -1) {
+    document.getElementById('api-warning-banner').classList.remove('hidden');
   }
-}
 
-function toggleTheme() {
-  const isDark = document.documentElement.classList.toggle('dark');
-  localStorage.setItem('yunako_theme', isDark ? 'dark' : 'light');
-}
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js').catch(function(err) {
+      console.warn('SW registration skipped:', err);
+    });
+  }
 
-function bindGlobalEvents() {
   document.getElementById('login-form').addEventListener('submit', handleLoginSubmit);
-  document.getElementById('toggle-pass-btn').addEventListener('click', () => {
-    const inp = document.getElementById('login-password');
-    inp.type = inp.type === 'password' ? 'text' : 'password';
-  });
+  document.getElementById('toggle-password-btn').addEventListener('click', togglePasswordVisibility);
+  document.getElementById('logout-btn-desktop').addEventListener('click', handleLogout);
+  document.getElementById('logout-btn-mobile').addEventListener('click', handleLogout);
+  document.getElementById('change-password-form').addEventListener('submit', handleChangePasswordSubmit);
+  document.getElementById('trial-report-form').addEventListener('submit', handleTrialFormSubmit);
 
-  document.getElementById('theme-toggle-btn').addEventListener('click', toggleTheme);
-  document.getElementById('refresh-data-btn').addEventListener('click', () => fetchBootstrapData(true));
-  document.getElementById('desktop-logout-btn').addEventListener('click', logoutUser);
-  document.getElementById('modal-close-btn').addEventListener('click', closeModal);
-  document.getElementById('notif-btn').addEventListener('click', openNotificationsModal);
-
-  document.querySelectorAll('.nav-btn, .nav-btn-mobile').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const route = btn.getAttribute('data-nav');
-      navigateTo(route);
+  document.querySelectorAll('.nav-link').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      const route = btn.getAttribute('data-route');
+      if (route) navigateTo(route);
     });
   });
-}
+});
 
 /* ============================================================================
- * 2. API CLIENT & OFFLINE CACHE
+ * 2. KOMUNIKASI API GOOGLE APPS SCRIPT
  * ============================================================================ */
 
-async function callGasApi(action, payload = {}) {
-  if (GAS_WEB_APP_URL.includes('GANTI_DENGAN_DEPLOYMENT_ID_ANDA')) {
-    throw new Error('URL GAS_WEB_APP_URL di app.js belum diisi dengan URL Web App Anda.');
+async function callApi(action, payload) {
+  if (GAS_WEB_APP_URL.indexOf('PASTE_YOUR') > -1) {
+    throw new Error('URL Google Apps Script belum dikonfigurasi di app.js');
   }
-  const body = JSON.stringify({
-    action,
-    user: STATE.user,
-    ...payload
-  });
 
   const response = await fetch(GAS_WEB_APP_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body
+    headers: {
+      'Content-Type': 'text/plain;charset=utf-8'
+    },
+    body: JSON.stringify({
+      action: action,
+      token: AppState.token,
+      payload: payload || {}
+    })
   });
 
   if (!response.ok) {
-    throw new Error('Gagal terhubung ke server GAS (' + response.status + ')');
+    throw new Error('HTTP Error ' + response.status);
   }
+
   const result = await response.json();
-  if (result.status === 'error') {
+  if (!result.success) {
+    if (result.errorCode === 'UNAUTHORIZED') {
+      AppState.token = null;
+      AppState.user = null;
+      showLoginScreen();
+    }
     throw new Error(result.message || 'Terjadi kesalahan pada server.');
   }
+
   return result;
 }
 
-function showToast(message, type = 'info') {
+function showToast(message, type) {
   const container = document.getElementById('toast-container');
-  const colors = {
-    success: 'bg-emerald-600 text-white',
-    error: 'bg-red-600 text-white',
-    info: 'bg-slate-900 text-white dark:bg-blue-600'
-  };
-  const el = document.createElement('div');
-  el.className = `pointer-events-auto px-4 py-3 rounded-xl shadow-lg text-xs font-medium flex items-center justify-between gap-3 transition-all ${colors[type] || colors.info}`;
-  el.innerHTML = `<span>${escapeHtml(message)}</span>`;
-  container.appendChild(el);
-  setTimeout(() => {
-    el.style.opacity = '0';
-    setTimeout(() => el.remove(), 300);
-  }, 3500);
-}
+  const toast = document.createElement('div');
+  const bgClass = type === 'error'
+    ? 'bg-red-600 text-white'
+    : (type === 'warning' ? 'bg-amber-500 text-white' : 'bg-emerald-600 text-white');
 
-/* ============================================================================
- * 3. SESSION & AUTHENTICATION
- * ============================================================================ */
+  toast.className = 'pointer-events-auto px-4 py-3 rounded-xl shadow-lg text-sm font-medium flex items-center justify-between gap-3 transition-all ' + bgClass;
+  toast.innerHTML = '<span>' + escapeHtml(message) + '</span><button onclick="this.parentElement.remove()" class="text-white/80 hover:text-white font-bold">&times;</button>';
+  container.appendChild(toast);
 
-function checkExistingSession() {
-  const savedUser = sessionStorage.getItem('yunako_user');
-  if (savedUser) {
-    STATE.user = JSON.parse(savedUser);
-    enterAppShell();
+  if (type !== 'error') {
+    setTimeout(function() {
+      if (toast.parentElement) toast.remove();
+    }, 3500);
   }
-}
-
-async function handleLoginSubmit(e) {
-  e.preventDefault();
-  const btn = document.getElementById('login-submit-btn');
-  const username = document.getElementById('login-username').value.trim();
-  const password = document.getElementById('login-password').value;
-
-  btn.disabled = true;
-  btn.innerHTML = `<span>Memverifikasi...</span>`;
-
-  try {
-    const res = await callGasApi('login', { username, password });
-    STATE.user = res.user;
-    sessionStorage.setItem('yunako_user', JSON.stringify(res.user));
-    showToast('Selamat datang, ' + res.user.Nama_Lengkap, 'success');
-    enterAppShell();
-  } catch (err) {
-    showToast(err.message, 'error');
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = `<span>Masuk ke Aplikasi</span><i data-lucide="arrow-right" class="w-4 h-4"></i>`;
-    lucide.createIcons();
-  }
-}
-
-function enterAppShell() {
-  document.getElementById('login-view').classList.add('hidden');
-  document.getElementById('app-shell').classList.remove('hidden');
-
-  const u = STATE.user;
-  document.getElementById('sidebar-user-name').textContent = u.Nama_Lengkap;
-  document.getElementById('sidebar-user-role').textContent = `${u.Role} • ${u.Departemen}`;
-  document.getElementById('sidebar-avatar').textContent = u.Nama_Lengkap.slice(0, 2).toUpperCase();
-
-  const cachedData = localStorage.getItem('yunako_cache_data');
-  if (cachedData) {
-    try {
-      const parsed = JSON.parse(cachedData);
-      STATE.data = { ...STATE.data, ...parsed };
-      renderCurrentRoute();
-    } catch (e) {}
-  }
-
-  fetchBootstrapData(false);
-}
-
-function logoutUser() {
-  sessionStorage.removeItem('yunako_user');
-  STATE.user = null;
-  document.getElementById('app-shell').classList.add('hidden');
-  document.getElementById('login-view').classList.remove('hidden');
-  showToast('Anda telah keluar dari sesi.', 'info');
-}
-
-async function fetchBootstrapData(showNotif = false) {
-  const syncText = document.getElementById('sync-status-text');
-  syncText.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping inline-block"></span> Menyinkronkan...`;
-
-  try {
-    const res = await callGasApi('getBootstrapData');
-    STATE.data = { ...STATE.data, ...res.data };
-    localStorage.setItem('yunako_cache_data', JSON.stringify(STATE.data));
-    updateNotificationBadge();
-    renderCurrentRoute();
-    syncText.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block"></span> Tersinkronisasi`;
-    if (showNotif) showToast('Data berhasil diperbarui.', 'success');
-  } catch (err) {
-    syncText.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-red-500 inline-block"></span> Mode Offline`;
-    showToast(err.message, 'error');
-  }
-}
-
-function updateNotificationBadge() {
-  const unread = (STATE.data.notifications || []).filter(n =>
-    String(n.Is_Read).toUpperCase() !== 'TRUE' &&
-    (n.User_ID === STATE.user.User_ID || n.User_ID === 'ALL')
-  );
-  const badge = document.getElementById('notif-badge');
-  if (unread.length > 0) {
-    badge.textContent = unread.length;
-    badge.classList.remove('hidden');
-  } else {
-    badge.classList.add('hidden');
-  }
-}
-
-/* ============================================================================
- * 4. NAVIGATION ROUTER
- * ============================================================================ */
-
-function navigateTo(route) {
-  STATE.currentRoute = route;
-  if (route !== 'audit') STATE.activeAuditId = null;
-  if (route !== 'trial') STATE.activeTrialId = null;
-
-  const titles = {
-    dashboard: 'Dashboard Operasional',
-    schedule: 'Schedule & Agenda',
-    tasks: 'Task Manager',
-    audit: 'Quality Audit Center',
-    trial: 'Activity Trial Report',
-    capa: 'CAPA & Tindak Lanjut Temuan',
-    settings: 'Pengaturan & Profil'
-  };
-  document.getElementById('page-title').textContent = titles[route] || 'Dashboard';
-
-  document.querySelectorAll('.nav-btn').forEach(btn => {
-    const active = btn.getAttribute('data-nav') === route;
-    btn.className = active
-      ? 'nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold transition bg-blue-800 text-white shadow-xs'
-      : 'nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-blue-100 hover:bg-blue-800/60 transition';
-  });
-
-  document.querySelectorAll('.nav-btn-mobile').forEach(btn => {
-    const active = btn.getAttribute('data-nav') === route;
-    btn.className = active
-      ? 'nav-btn-mobile flex flex-col items-center justify-center flex-1 py-1 text-blue-600 dark:text-blue-400 font-semibold'
-      : 'nav-btn-mobile flex flex-col items-center justify-center flex-1 py-1 text-slate-500 dark:text-slate-400';
-  });
-
-  renderCurrentRoute();
-}
-
-function renderCurrentRoute() {
-  const main = document.getElementById('main-content');
-  switch (STATE.currentRoute) {
-    case 'dashboard': renderDashboard(main); break;
-    case 'schedule': renderSchedule(main); break;
-    case 'tasks': renderTasks(main); break;
-    case 'audit':
-      if (STATE.activeAuditId) renderAuditExecution(main, STATE.activeAuditId);
-      else renderAuditList(main);
-      break;
-    case 'trial':
-      if (STATE.activeTrialId) renderTrialDetail(main, STATE.activeTrialId);
-      else renderTrialList(main);
-      break;
-    case 'capa': renderCapa(main); break;
-    case 'settings': renderSettings(main); break;
-  }
-  lucide.createIcons();
-}
-
-/* ============================================================================
- * 5. VIEW: DASHBOARD
- * ============================================================================ */
-
-function renderDashboard(container) {
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const schedulesToday = STATE.data.schedules.filter(s => s.Tanggal_Mulai === todayStr);
-  const openTasks = STATE.data.tasks.filter(t => t.Status !== 'Done');
-  const openCapas = STATE.data.capas.filter(c => c.Status_CAPA !== 'Verified');
-  const trials = STATE.data.trialReports || [];
-
-  const completedAudits = STATE.data.audits.filter(a => a.Status_Audit === 'Completed');
-  const avgScore = completedAudits.length > 0
-    ? Math.round(completedAudits.reduce((acc, a) => acc + Number(a.Score_Persen || 0), 0) / completedAudits.length)
-    : 100;
-
-  container.innerHTML = `
-    <!-- KPI CARDS -->
-    <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 lg:gap-4">
-      <div class="bg-white dark:bg-[#1E293B] p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
-        <div class="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-1.5">
-          <span class="text-xs font-medium">Agenda Hari Ini</span>
-          <i data-lucide="calendar" class="w-4 h-4 text-blue-600"></i>
-        </div>
-        <p class="text-2xl font-bold tabular-nums">${schedulesToday.length}</p>
-        <p class="text-[11px] text-slate-400 mt-1">Total ${STATE.data.schedules.length} jadwal</p>
-      </div>
-
-      <div class="bg-white dark:bg-[#1E293B] p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
-        <div class="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-1.5">
-          <span class="text-xs font-medium">Tugas Aktif</span>
-          <i data-lucide="list-todo" class="w-4 h-4 text-amber-500"></i>
-        </div>
-        <p class="text-2xl font-bold tabular-nums">${openTasks.length}</p>
-        <p class="text-[11px] text-slate-400 mt-1">${STATE.data.tasks.filter(t => t.Status === 'Done').length} tugas selesai</p>
-      </div>
-
-      <div class="bg-white dark:bg-[#1E293B] p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
-        <div class="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-1.5">
-          <span class="text-xs font-medium">Skor Audit</span>
-          <i data-lucide="award" class="w-4 h-4 text-emerald-600"></i>
-        </div>
-        <p class="text-2xl font-bold tabular-nums">${avgScore}%</p>
-        <p class="text-[11px] text-slate-400 mt-1">${completedAudits.length} sesi selesai</p>
-      </div>
-
-      <div class="bg-white dark:bg-[#1E293B] p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
-        <div class="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-1.5">
-          <span class="text-xs font-medium">Trial Report</span>
-          <i data-lucide="flask-conical" class="w-4 h-4 text-indigo-600"></i>
-        </div>
-        <p class="text-2xl font-bold tabular-nums">${trials.length}</p>
-        <p class="text-[11px] text-slate-400 mt-1">${trials.filter(t => t.Hasil_Inspeksi_Status === 'OK').length} hasil OK</p>
-      </div>
-
-      <div class="col-span-2 lg:col-span-1 bg-white dark:bg-[#1E293B] p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
-        <div class="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-1.5">
-          <span class="text-xs font-medium">CAPA Open</span>
-          <i data-lucide="alert-circle" class="w-4 h-4 text-red-600"></i>
-        </div>
-        <p class="text-2xl font-bold tabular-nums text-red-600 dark:text-red-400">${openCapas.length}</p>
-        <p class="text-[11px] text-slate-400 mt-1">Perlu verifikasi</p>
-      </div>
-    </div>
-
-    <!-- QUICK ACTIONS -->
-    <div class="bg-white dark:bg-[#1E293B] p-5 rounded-2xl border border-slate-200 dark:border-slate-800">
-      <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Aksi Cepat Lapangan</h3>
-      <div class="grid grid-cols-2 sm:grid-cols-5 gap-3">
-        <button onclick="openTrialModal()" class="flex items-center gap-2.5 p-3 rounded-xl bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 font-semibold text-xs transition">
-          <i data-lucide="flask-conical" class="w-4 h-4"></i> + Trial Report
-        </button>
-        <button onclick="openScheduleModal()" class="flex items-center gap-2.5 p-3 rounded-xl bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 hover:bg-blue-100 font-semibold text-xs transition">
-          <i data-lucide="calendar-plus" class="w-4 h-4"></i> + Jadwal Baru
-        </button>
-        <button onclick="openTaskModal()" class="flex items-center gap-2.5 p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 font-semibold text-xs transition">
-          <i data-lucide="plus-circle" class="w-4 h-4"></i> + Tambah Tugas
-        </button>
-        <button onclick="openNewAuditModal()" class="flex items-center gap-2.5 p-3 rounded-xl bg-purple-50 dark:bg-purple-950/50 text-purple-700 dark:text-purple-300 hover:bg-purple-100 font-semibold text-xs transition">
-          <i data-lucide="clipboard-plus" class="w-4 h-4"></i> + Mulai Audit
-        </button>
-        <button onclick="navigateTo('capa')" class="flex items-center gap-2.5 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 hover:bg-amber-100 font-semibold text-xs transition">
-          <i data-lucide="shield-alert" class="w-4 h-4"></i> Cek CAPA
-        </button>
-      </div>
-    </div>
-
-    <!-- TWO COLUMN SUMMARY -->
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <div class="bg-white dark:bg-[#1E293B] p-5 rounded-2xl border border-slate-200 dark:border-slate-800">
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="font-bold text-sm">Activity Trial Report Terbaru</h3>
-          <button onclick="navigateTo('trial')" class="text-xs text-blue-600 font-semibold hover:underline">Lihat Semua</button>
-        </div>
-        <div class="space-y-3">
-          ${trials.slice(-4).reverse().map(tr => `
-            <div onclick="openTrialDetail('${tr.Trial_ID}')" class="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-100 dark:border-slate-800 flex items-center justify-between gap-3 cursor-pointer hover:border-blue-400 transition">
-              <div class="min-w-0">
-                <p class="font-semibold text-xs truncate">${escapeHtml(tr.Nama_Trial)}</p>
-                <p class="text-[11px] text-slate-500 mt-0.5">${escapeHtml(tr.Item_Trial)} • Lot: ${escapeHtml(tr.No_Lot)} • ${escapeHtml(tr.Tanggal_Trial)}</p>
-              </div>
-              ${renderTrialResultBadge(tr.Hasil_Inspeksi_Status)}
-            </div>
-          `).join('') || '<p class="text-xs text-slate-400 py-4 text-center">Belum ada laporan trial tersimpan.</p>'}
-        </div>
-      </div>
-
-      <div class="bg-white dark:bg-[#1E293B] p-5 rounded-2xl border border-slate-200 dark:border-slate-800">
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="font-bold text-sm">Tugas Prioritas & Tenggat Terdekat</h3>
-          <button onclick="navigateTo('tasks')" class="text-xs text-blue-600 font-semibold hover:underline">Lihat Semua</button>
-        </div>
-        <div class="space-y-3">
-          ${openTasks.slice(0, 4).map(t => `
-            <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-100 dark:border-slate-800 flex items-center justify-between gap-3">
-              <div class="min-w-0">
-                <p class="font-semibold text-xs truncate">${escapeHtml(t.Judul_Tugas)}</p>
-                <p class="text-[11px] text-slate-500 mt-0.5">Deadline: ${escapeHtml(t.Deadline || '-')} • PIC: ${getUserName(t.Assignee_User_ID)}</p>
-              </div>
-              <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold ${t.Prioritas === 'High' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}">
-                ${escapeHtml(t.Prioritas)}
-              </span>
-            </div>
-          `).join('') || '<p class="text-xs text-slate-400 py-4 text-center">Semua tugas telah selesai.</p>'}
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-/* ============================================================================
- * 6. VIEW: ACTIVITY TRIAL REPORT (LIST, DETAIL & FLOW BUILDER)
- * ============================================================================ */
-
-function renderTrialResultBadge(status) {
-  const s = String(status || 'OK').toUpperCase();
-  if (s === 'OK') {
-    return `<span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300 shrink-0">✓ OK</span>`;
-  }
-  if (s === 'NG') {
-    return `<span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300 shrink-0">✕ NG</span>`;
-  }
-  return `<span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300 shrink-0">⚠ CONDITIONAL</span>`;
-}
-
-function parseFlowJson(rawJson) {
-  if (!rawJson) return [];
-  if (Array.isArray(rawJson)) return rawJson;
-  try {
-    const parsed = JSON.parse(rawJson);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (e) {
-    return [];
-  }
-}
-
-function renderTrialList(container) {
-  const canEdit = STATE.user.Role === 'Admin' || STATE.user.Role === 'Auditor';
-  const allTrials = (STATE.data.trialReports || []).slice().reverse();
-  const filtered = STATE.trialFilter === 'ALL'
-    ? allTrials
-    : allTrials.filter(t => String(t.Hasil_Inspeksi_Status).toUpperCase() === STATE.trialFilter);
-
-  container.innerHTML = `
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-      <div class="flex flex-wrap gap-2">
-        ${['ALL', 'OK', 'NG', 'CONDITIONAL'].map(f => `
-          <button onclick="setTrialFilter('${f}')" class="px-3 py-1.5 rounded-xl text-xs font-semibold transition ${STATE.trialFilter === f ? 'bg-[#1E3A8A] text-white' : 'bg-white dark:bg-[#1E293B] border border-slate-200 dark:border-slate-700'}">
-            ${f === 'ALL' ? 'Semua (' + allTrials.length + ')' : f}
-          </button>
-        `).join('')}
-      </div>
-      ${canEdit ? `
-        <button onclick="openTrialModal()" class="px-4 py-2 bg-[#1E3A8A] hover:bg-blue-800 text-white text-xs font-semibold rounded-xl flex items-center gap-2 self-start shadow-xs">
-          <i data-lucide="plus" class="w-4 h-4"></i> Buat Trial Report Baru
-        </button>
-      ` : ''}
-    </div>
-
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      ${filtered.map(tr => {
-        const steps = parseFlowJson(tr.Flow_Trial_JSON);
-        const trialAreas = steps.filter(s => s.isTrialArea).map(s => s.step).join(', ') || 'Belum ditandai';
-        return `
-          <div class="bg-white dark:bg-[#1E293B] p-5 rounded-2xl border border-slate-200 dark:border-slate-800 flex flex-col justify-between gap-4 hover:border-blue-400 transition">
-            <div>
-              <div class="flex items-center justify-between gap-2 mb-2">
-                <span class="font-mono text-[11px] font-semibold text-blue-600 dark:text-blue-400">${escapeHtml(tr.Trial_ID)}</span>
-                <div class="flex items-center gap-1.5">
-                  <span class="px-2 py-0.5 rounded-md text-[10px] font-semibold ${tr.Status_Trial === 'Draft' ? 'bg-slate-200 text-slate-700' : 'bg-blue-100 text-blue-800'}">${escapeHtml(tr.Status_Trial || 'Final')}</span>
-                  ${renderTrialResultBadge(tr.Hasil_Inspeksi_Status)}
-                </div>
-              </div>
-              <h4 class="font-bold text-sm text-slate-900 dark:text-white">${escapeHtml(tr.Nama_Trial)}</h4>
-              <p class="text-xs text-slate-500 mt-1 line-clamp-2">${escapeHtml(tr.Tujuan_Trial)}</p>
-
-              <div class="mt-3 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-100 dark:border-slate-800 grid grid-cols-2 gap-2 text-[11px]">
-                <div><span class="text-slate-400 block">Item Trial:</span><span class="font-semibold">${escapeHtml(tr.Item_Trial)}</span></div>
-                <div><span class="text-slate-400 block">No. Lot / Qty:</span><span class="font-semibold">${escapeHtml(tr.No_Lot)} (${escapeHtml(tr.Qty)})</span></div>
-                <div class="col-span-2 pt-1 border-t border-slate-200/70 dark:border-slate-800">
-                  <span class="text-slate-400">📍 Area Trial:</span>
-                  <span class="font-bold text-red-600 dark:text-red-400">${escapeHtml(trialAreas)}</span>
-                </div>
-              </div>
-            </div>
-
-            <div class="flex items-center justify-between pt-3 border-t border-slate-100 dark:border-slate-800">
-              <span class="text-[11px] text-slate-400">Tgl: ${escapeHtml(tr.Tanggal_Trial)} • OK: ${tr.Qty_OK || 0} / NG: ${tr.Qty_NG || 0}</span>
-              <div class="flex items-center gap-2">
-                ${canEdit ? `
-                  <button onclick="openTrialModal('${tr.Trial_ID}')" class="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-medium">
-                    Edit
-                  </button>
-                ` : ''}
-                <button onclick="openTrialDetail('${tr.Trial_ID}')" class="px-3 py-1.5 rounded-lg bg-[#1E3A8A] text-white text-xs font-semibold hover:bg-blue-800">
-                  Lihat Laporan
-                </button>
-              </div>
-            </div>
-          </div>
-        `;
-      }).join('') || '<div class="col-span-full bg-white dark:bg-[#1E293B] p-10 rounded-2xl text-center text-xs text-slate-400">Belum ada Activity Trial Report. Klik tombol "+ Buat Trial Report Baru" untuk mulai mencatat.</div>'}
-    </div>
-  `;
-}
-
-function setTrialFilter(filterVal) {
-  STATE.trialFilter = filterVal;
-  renderCurrentRoute();
-}
-
-function openTrialDetail(trialId) {
-  STATE.activeTrialId = trialId;
-  renderCurrentRoute();
-}
-
-function renderTrialDetail(container, trialId) {
-  const tr = (STATE.data.trialReports || []).find(t => t.Trial_ID === trialId);
-  if (!tr) {
-    STATE.activeTrialId = null;
-    return renderTrialList(container);
-  }
-
-  const steps = parseFlowJson(tr.Flow_Trial_JSON);
-  const canEdit = STATE.user.Role === 'Admin' || STATE.user.Role === 'Auditor';
-
-  container.innerHTML = `
-    <!-- TOOLBAR AKSI -->
-    <div class="flex flex-wrap items-center justify-between gap-3 no-print">
-      <button onclick="openTrialDetail(null)" class="text-xs font-semibold text-blue-600 flex items-center gap-1 hover:underline">
-        <i data-lucide="arrow-left" class="w-4 h-4"></i> Kembali ke Daftar Trial
-      </button>
-      <div class="flex flex-wrap items-center gap-2">
-        ${canEdit ? `
-          <button onclick="openTrialModal('${tr.Trial_ID}')" class="px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1E293B] text-xs font-semibold flex items-center gap-1.5 hover:bg-slate-50">
-            <i data-lucide="edit-3" class="w-3.5 h-3.5"></i> Edit Report
-          </button>
-          <button onclick="deleteTrialReport('${tr.Trial_ID}')" class="px-3 py-2 rounded-xl border border-red-200 text-red-600 bg-red-50/50 text-xs font-semibold flex items-center gap-1.5 hover:bg-red-100">
-            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Hapus
-          </button>
-        ` : ''}
-        <button onclick="window.print()" class="px-4 py-2 rounded-xl bg-[#1E3A8A] text-white text-xs font-semibold flex items-center gap-1.5 hover:bg-blue-800 shadow-xs">
-          <i data-lucide="printer" class="w-3.5 h-3.5"></i> Cetak / Export PDF
-        </button>
-      </div>
-    </div>
-
-    <!-- DOKUMEN LAPORAN TRIAL (PRINT-READY) -->
-    <article class="bg-white dark:bg-[#1E293B] p-6 lg:p-8 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-6 print-only-clean">
-      <!-- KOP DOKUMEN -->
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b-2 border-[#1E3A8A]">
-        <div>
-          <span class="text-[11px] font-bold uppercase tracking-widest text-blue-600 dark:text-blue-400">YUNAKO QUALITY & ENGINEERING REPORT</span>
-          <h3 class="text-xl font-bold text-slate-900 dark:text-white mt-1">${escapeHtml(tr.Nama_Trial)}</h3>
-          <p class="text-xs text-slate-500 mt-1">Dibuat oleh: ${getUserName(tr.Created_By)} • Status: ${escapeHtml(tr.Status_Trial || 'Final')}</p>
-        </div>
-        <div class="sm:text-right">
-          <span class="font-mono text-xs font-bold px-3 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 block mb-1.5">${escapeHtml(tr.Trial_ID)}</span>
-          ${renderTrialResultBadge(tr.Hasil_Inspeksi_Status)}
-        </div>
-      </div>
-
-      <!-- TUJUAN TRIAL -->
-      <div class="p-4 rounded-xl bg-blue-50/60 dark:bg-blue-950/30 border border-blue-100 dark:border-blue-900">
-        <p class="text-[11px] font-bold uppercase tracking-wider text-blue-700 dark:text-blue-300 mb-1">Tujuan Trial</p>
-        <p class="text-sm text-slate-800 dark:text-slate-200 whitespace-pre-line">${escapeHtml(tr.Tujuan_Trial || '-')}</p>
-      </div>
-
-      <!-- IDENTITAS LOT & SAMPEL -->
-      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div class="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200/70 dark:border-slate-800">
-          <span class="text-[11px] text-slate-400 block">Tanggal Trial</span>
-          <span class="text-sm font-bold tabular-nums">${escapeHtml(tr.Tanggal_Trial || '-')}</span>
-        </div>
-        <div class="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200/70 dark:border-slate-800">
-          <span class="text-[11px] text-slate-400 block">Item / Part Trial</span>
-          <span class="text-sm font-bold">${escapeHtml(tr.Item_Trial || '-')}</span>
-        </div>
-        <div class="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200/70 dark:border-slate-800">
-          <span class="text-[11px] text-slate-400 block">Nomor Lot</span>
-          <span class="text-sm font-bold font-mono">${escapeHtml(tr.No_Lot || '-')}</span>
-        </div>
-        <div class="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200/70 dark:border-slate-800">
-          <span class="text-[11px] text-slate-400 block">Qty Sampel Trial</span>
-          <span class="text-sm font-bold tabular-nums">${escapeHtml(tr.Qty || '-')}</span>
-        </div>
-      </div>
-
-      <!-- FLOW PROSES, PARAMETER LARUTAN & PENANDA AREA TRIAL -->
-      <div>
-        <div class="flex items-center justify-between mb-3">
-          <h4 class="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300">Flow Proses, Parameter Larutan & Titik Area Trial</h4>
-          <span class="text-[11px] font-semibold text-red-600 dark:text-red-400 flex items-center gap-1">
-            <span class="w-2.5 h-2.5 rounded-full bg-red-600 inline-block"></span> Area yang Ditandai Trial
-          </span>
-        </div>
-
-        <div class="flex flex-wrap items-stretch gap-2.5">
-          ${steps.map((st, idx) => `
-            <div class="flex items-center gap-2">
-              <div class="w-48 sm:w-52 p-3.5 rounded-xl border-2 transition ${st.isTrialArea
-                ? 'border-red-500 bg-red-50/80 dark:bg-red-950/30 shadow-xs'
-                : 'border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/50'}">
-                <div class="flex items-center justify-between gap-1 mb-1">
-                  <span class="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${st.isTrialArea ? 'bg-red-600 text-white' : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300'}">
-                    ${st.isTrialArea ? '📍 AREA TRIAL' : 'Proses #' + (idx + 1)}
-                  </span>
-                </div>
-                <p class="font-bold text-xs text-slate-900 dark:text-white mt-1">${idx + 1}. ${escapeHtml(st.step)}</p>
-                <div class="mt-2 pt-2 border-t ${st.isTrialArea ? 'border-red-200 dark:border-red-800' : 'border-slate-200 dark:border-slate-800'}">
-                  <span class="text-[10px] text-slate-400 block">Parameter / Konsentrasi:</span>
-                  <p class="text-[11px] font-mono font-semibold text-slate-700 dark:text-slate-200 mt-0.5 whitespace-pre-line">${escapeHtml(st.parameter || '-')}</p>
-                </div>
-              </div>
-              ${idx < steps.length - 1 ? `<i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 shrink-0"></i>` : ''}
-            </div>
-          `).join('') || '<p class="text-xs text-slate-400">Tidak ada data flow proses.</p>'}
-        </div>
-      </div>
-
-      <!-- HASIL INSPEKSI VISUAL & BUKTI FOTO -->
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 pt-2">
-        <div class="p-4 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
-          <div class="flex items-center justify-between">
-            <h4 class="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300">Hasil Inspeksi Visual & Pengukuran</h4>
-            ${renderTrialResultBadge(tr.Hasil_Inspeksi_Status)}
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            <div class="p-2.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900">
-              <span class="text-[11px] text-emerald-700 dark:text-emerald-300 block">Jumlah OK</span>
-              <span class="text-lg font-bold text-emerald-700 dark:text-emerald-400 tabular-nums">${tr.Qty_OK || 0} pcs</span>
-            </div>
-            <div class="p-2.5 rounded-lg bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900">
-              <span class="text-[11px] text-red-700 dark:text-red-300 block">Jumlah NG</span>
-              <span class="text-lg font-bold text-red-700 dark:text-red-400 tabular-nums">${tr.Qty_NG || 0} pcs</span>
-            </div>
-          </div>
-          <div>
-            <span class="text-[11px] font-semibold text-slate-400 block mb-1">Catatan / Temuan Inspeksi:</span>
-            <p class="text-xs text-slate-700 dark:text-slate-300 whitespace-pre-line">${escapeHtml(tr.Detail_Hasil_Inspeksi || '-')}</p>
-          </div>
-        </div>
-
-        <div class="p-4 rounded-xl border border-slate-200 dark:border-slate-800 flex flex-col justify-between">
-          <h4 class="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-2">Dokumentasi Foto Hasil Trial</h4>
-          ${tr.Bukti_Foto_URL ? `
-            <div class="space-y-2">
-              <img src="${escapeHtml(tr.Bukti_Foto_URL)}" alt="Bukti Hasil Trial" class="w-full max-h-56 object-contain rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900" />
-              <a href="${escapeHtml(tr.Bukti_Foto_URL)}" target="_blank" class="text-[11px] text-blue-600 font-semibold hover:underline inline-flex items-center gap-1 no-print">
-                <i data-lucide="external-link" class="w-3 h-3"></i> Buka Foto Resolusi Penuh di Google Drive
-              </a>
-            </div>
-          ` : `
-            <div class="flex-1 flex items-center justify-center p-6 rounded-xl bg-slate-50 dark:bg-slate-900/50 border border-dashed border-slate-300 dark:border-slate-700 text-xs text-slate-400">
-              Tidak ada lampiran foto pada laporan trial ini.
-            </div>
-          `}
-        </div>
-      </div>
-
-      <!-- KESIMPULAN & NEXT TRIAL -->
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div class="p-4 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-800">
-          <h4 class="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1.5">Kesimpulan Trial</h4>
-          <p class="text-xs text-slate-800 dark:text-slate-200 whitespace-pre-line leading-relaxed">${escapeHtml(tr.Kesimpulan_Trial || '-')}</p>
-        </div>
-        <div class="p-4 rounded-xl bg-amber-50/60 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900">
-          <h4 class="text-xs font-bold uppercase tracking-wider text-amber-800 dark:text-amber-300 mb-1.5">Next Trial / Rencana Tindak Lanjut</h4>
-          <p class="text-xs text-slate-800 dark:text-slate-200 whitespace-pre-line leading-relaxed">${escapeHtml(tr.Next_Trial || '-')}</p>
-        </div>
-      </div>
-    </article>
-  `;
-}
-
-function openTrialModal(trialId = null) {
-  const existing = trialId ? (STATE.data.trialReports || []).find(t => t.Trial_ID === trialId) : null;
-  STATE.trialPhotoData = null;
-
-  if (existing) {
-    STATE.trialFlowDraft = parseFlowJson(existing.Flow_Trial_JSON);
-  } else {
-    STATE.trialFlowDraft = [
-      { step: 'Degreasing', parameter: '', isTrialArea: false },
-      { step: 'Pickling', parameter: '', isTrialArea: true },
-      { step: 'Plating', parameter: '', isTrialArea: false }
-    ];
-  }
-
-  const today = new Date().toISOString().slice(0, 10);
-
-  openModal(existing ? 'Edit Activity Trial Report' : 'Buat Activity Trial Report Baru', `
-    <form id="trial-form" class="space-y-4">
-      <input type="hidden" id="trl-id" value="${existing ? escapeHtml(existing.Trial_ID) : ''}" />
-
-      <div>
-        <label class="block text-xs font-semibold mb-1">Nama Trial *</label>
-        <input type="text" id="trl-nama" required value="${existing ? escapeHtml(existing.Nama_Trial) : ''}"
-          placeholder="Contoh: Trial Optimasi Konsentrasi Pickling HCl"
-          class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-      </div>
-
-      <div>
-        <label class="block text-xs font-semibold mb-1">Tujuan Trial *</label>
-        <textarea id="trl-tujuan" rows="2" required placeholder="Jelaskan target kualitas / masalah yang ingin diselesaikan..."
-          class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs">${existing ? escapeHtml(existing.Tujuan_Trial) : ''}</textarea>
-      </div>
-
-      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div>
-          <label class="block text-xs font-semibold mb-1">Tanggal Trial *</label>
-          <input type="date" id="trl-tgl" required value="${existing ? escapeHtml(existing.Tanggal_Trial) : today}"
-            class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-        </div>
-        <div>
-          <label class="block text-xs font-semibold mb-1">Item / Part Trial *</label>
-          <input type="text" id="trl-item" required value="${existing ? escapeHtml(existing.Item_Trial) : ''}"
-            placeholder="Self Lock Nut M8"
-            class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-        </div>
-        <div>
-          <label class="block text-xs font-semibold mb-1">No. Lot *</label>
-          <input type="text" id="trl-lot" required value="${existing ? escapeHtml(existing.No_Lot) : ''}"
-            placeholder="LOT-2611-01"
-            class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-        </div>
-        <div>
-          <label class="block text-xs font-semibold mb-1">Qty Sampel *</label>
-          <input type="text" id="trl-qty" required value="${existing ? escapeHtml(existing.Qty) : ''}"
-            placeholder="300 pcs"
-            class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-        </div>
-      </div>
-
-      <!-- FLOW TRIAL BUILDER -->
-      <div class="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-800 space-y-3">
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <label class="block text-xs font-bold text-slate-800 dark:text-white">Flow Trial & Parameter Larutan per Proses</label>
-            <p class="text-[11px] text-slate-500">Isi urutan proses, konsentrasi/parameter larutan, dan klik tombol <b>Area Trial</b> pada titik yang diuji.</p>
-          </div>
-          <div class="flex gap-1.5">
-            <button type="button" onclick="applyPlatingPreset()" class="px-2.5 py-1 rounded-lg bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 text-[11px] font-semibold hover:bg-blue-200">
-              Preset Plating
-            </button>
-            <button type="button" onclick="addTrialFlowStep()" class="px-2.5 py-1 rounded-lg bg-[#1E3A8A] text-white text-[11px] font-semibold hover:bg-blue-800">
-              + Proses
-            </button>
-          </div>
-        </div>
-
-        <div id="flow-steps-container" class="space-y-2"></div>
-      </div>
-
-      <!-- HASIL INSPEKSI VISUAL -->
-      <div class="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
-        <label class="block text-xs font-bold text-slate-800 dark:text-white">Hasil Inspeksi Visual & Pengukuran</label>
-        <div class="grid grid-cols-3 gap-3">
-          <div>
-            <label class="block text-[11px] font-semibold mb-1">Keputusan Hasil</label>
-            <select id="trl-hasil-status" class="w-full px-2.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold">
-              <option value="OK" ${existing?.Hasil_Inspeksi_Status === 'OK' ? 'selected' : ''}>✓ OK (Lolos)</option>
-              <option value="NG" ${existing?.Hasil_Inspeksi_Status === 'NG' ? 'selected' : ''}>✕ NG (Gagal)</option>
-              <option value="CONDITIONAL" ${existing?.Hasil_Inspeksi_Status === 'CONDITIONAL' ? 'selected' : ''}>⚠ CONDITIONAL</option>
-            </select>
-          </div>
-          <div>
-            <label class="block text-[11px] font-semibold mb-1">Qty OK (pcs)</label>
-            <input type="number" id="trl-qty-ok" min="0" value="${existing ? Number(existing.Qty_OK || 0) : 0}"
-              class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-          </div>
-          <div>
-            <label class="block text-[11px] font-semibold mb-1">Qty NG (pcs)</label>
-            <input type="number" id="trl-qty-ng" min="0" value="${existing ? Number(existing.Qty_NG || 0) : 0}"
-              class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-          </div>
-        </div>
-
-        <div>
-          <label class="block text-[11px] font-semibold mb-1">Catatan Hasil Inspeksi Visual / Ukur</label>
-          <textarea id="trl-detail-hasil" rows="2" placeholder="Contoh: Permukaan cerah merata, tidak ada blistering/burnt, ketebalan XRF sesuai standar..."
-            class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs">${existing ? escapeHtml(existing.Detail_Hasil_Inspeksi) : ''}</textarea>
-        </div>
-
-        <div>
-          <label class="block text-[11px] font-semibold mb-1">Upload Foto Bukti Hasil Trial (Opsional)</label>
-          <input type="file" id="trl-foto-input" accept="image/*" capture="environment" onchange="handleTrialPhotoSelect(event)"
-            class="text-xs file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-blue-50 file:text-blue-700 file:font-semibold" />
-          <p id="trl-foto-status" class="text-[11px] text-slate-400 mt-1">
-            ${existing?.Bukti_Foto_URL ? 'Foto lama sudah tersimpan. Pilih file baru jika ingin mengganti.' : 'Foto otomatis dikompres & disimpan ke Google Drive.'}
-          </p>
-        </div>
-      </div>
-
-      <!-- KESIMPULAN & NEXT TRIAL -->
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div>
-          <label class="block text-xs font-semibold mb-1">Kesimpulan Trial *</label>
-          <textarea id="trl-kesimpulan" rows="3" required placeholder="Evaluasi akhir terhadap tujuan trial..."
-            class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs">${existing ? escapeHtml(existing.Kesimpulan_Trial) : ''}</textarea>
-        </div>
-        <div>
-          <label class="block text-xs font-semibold mb-1">Next Trial / Tindak Lanjut *</label>
-          <textarea id="trl-next" rows="3" required placeholder="Rencana parameter/lot trial berikutnya atau lanjut masspro..."
-            class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs">${existing ? escapeHtml(existing.Next_Trial) : ''}</textarea>
-        </div>
-      </div>
-
-      <div class="flex items-center justify-between pt-2 border-t border-slate-200 dark:border-slate-800 gap-3">
-        <select id="trl-status-doc" class="px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold">
-          <option value="Final" ${existing?.Status_Trial !== 'Draft' ? 'selected' : ''}>Status: Final Report</option>
-          <option value="Draft" ${existing?.Status_Trial === 'Draft' ? 'selected' : ''}>Status: Draft (Sementara)</option>
-        </select>
-        <button type="submit" id="trl-submit-btn" class="px-5 py-2.5 bg-[#1E3A8A] hover:bg-blue-800 text-white rounded-xl font-semibold text-xs flex items-center gap-2">
-          <i data-lucide="save" class="w-4 h-4"></i> Simpan Trial Report
-        </button>
-      </div>
-    </form>
-  `);
-
-  renderFlowStepsEditor();
-  document.getElementById('trial-form').addEventListener('submit', handleTrialFormSubmit);
-}
-
-function renderFlowStepsEditor() {
-  const container = document.getElementById('flow-steps-container');
-  if (!container) return;
-
-  container.innerHTML = STATE.trialFlowDraft.map((st, idx) => `
-    <div class="p-2.5 rounded-xl border ${st.isTrialArea ? 'border-red-400 bg-red-50/60 dark:bg-red-950/30' : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-[#1E293B]'} flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-      <div class="flex items-center gap-2 flex-1">
-        <span class="w-6 h-6 rounded-full bg-slate-200 dark:bg-slate-800 text-[11px] font-bold flex items-center justify-center shrink-0">${idx + 1}</span>
-        <input type="text" value="${escapeHtml(st.step)}" oninput="updateTrialFlowField(${idx}, 'step', this.value)"
-          placeholder="Nama Proses (misal: Pickling)"
-          class="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-xs font-semibold" />
-      </div>
-      <div class="flex-1">
-        <input type="text" value="${escapeHtml(st.parameter)}" oninput="updateTrialFlowField(${idx}, 'parameter', this.value)"
-          placeholder="Konsentrasi / Parameter (misal: HCl 12% • 4 mnt)"
-          class="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-xs font-mono" />
-      </div>
-      <div class="flex items-center justify-end gap-1.5 shrink-0">
-        <button type="button" onclick="toggleTrialFlowArea(${idx})"
-          class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition ${st.isTrialArea ? 'bg-red-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-red-100'}">
-          ${st.isTrialArea ? '📍 Area Trial' : 'Tandai Trial'}
-        </button>
-        ${STATE.trialFlowDraft.length > 1 ? `
-          <button type="button" onclick="removeTrialFlowStep(${idx})" class="p-1.5 rounded-lg text-slate-400 hover:text-red-600">
-            <i data-lucide="x" class="w-4 h-4"></i>
-          </button>
-        ` : ''}
-      </div>
-    </div>
-  `).join('');
-  lucide.createIcons();
-}
-
-function addTrialFlowStep() {
-  STATE.trialFlowDraft.push({ step: '', parameter: '', isTrialArea: false });
-  renderFlowStepsEditor();
-}
-
-function removeTrialFlowStep(idx) {
-  STATE.trialFlowDraft.splice(idx, 1);
-  renderFlowStepsEditor();
-}
-
-function updateTrialFlowField(idx, field, val) {
-  if (STATE.trialFlowDraft[idx]) {
-    STATE.trialFlowDraft[idx][field] = val;
-  }
-}
-
-function toggleTrialFlowArea(idx) {
-  if (STATE.trialFlowDraft[idx]) {
-    STATE.trialFlowDraft[idx].isTrialArea = !STATE.trialFlowDraft[idx].isTrialArea;
-    renderFlowStepsEditor();
-  }
-}
-
-function applyPlatingPreset() {
-  STATE.trialFlowDraft = [
-    { step: 'Degreasing', parameter: 'Alkaline Cleaner 45 g/L • 60°C • 5 mnt', isTrialArea: false },
-    { step: 'Water Rinse', parameter: 'Air Bilas Mengalir • Suhu Ruang', isTrialArea: false },
-    { step: 'Pickling', parameter: 'HCl 12% (120 mL/L) • 4 mnt', isTrialArea: true },
-    { step: 'Zinc Plating', parameter: 'Zn 12 g/L, NaOH 110 g/L • 2.5 A/dm²', isTrialArea: false },
-    { step: 'Chromate', parameter: 'Trivalent Cr3+ 8% • pH 2.0 • 45 dtk', isTrialArea: false },
-    { step: 'Dryer', parameter: 'Hot Air 80°C • 10 mnt', isTrialArea: false }
-  ];
-  renderFlowStepsEditor();
-}
-
-async function handleTrialPhotoSelect(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const statusEl = document.getElementById('trl-foto-status');
-  statusEl.textContent = 'Mengompres gambar...';
-  try {
-    const compressedBase64 = await compressImageToBase64(file, 1024, 0.78);
-    STATE.trialPhotoData = {
-      base64Data: compressedBase64,
-      fileName: file.name,
-      mimeType: 'image/jpeg'
-    };
-    statusEl.textContent = '✓ Foto siap diunggah (' + file.name + ')';
-    statusEl.className = 'text-[11px] text-emerald-600 font-semibold mt-1';
-  } catch (err) {
-    showToast('Gagal memproses foto: ' + err.message, 'error');
-  }
-}
-
-async function handleTrialFormSubmit(e) {
-  e.preventDefault();
-  const btn = document.getElementById('trl-submit-btn');
-  btn.disabled = true;
-  btn.innerHTML = `<span>Menyimpan...</span>`;
-
-  try {
-    const validFlow = STATE.trialFlowDraft.filter(s => String(s.step || '').trim() !== '');
-    if (validFlow.length === 0) {
-      throw new Error('Minimal isi 1 tahapan proses pada Flow Trial.');
-    }
-
-    let uploadedUrl = undefined;
-    let uploadedDriveId = undefined;
-
-    if (STATE.trialPhotoData) {
-      btn.innerHTML = `<span>Mengunggah Foto...</span>`;
-      const upRes = await callGasApi('uploadTrialEvidence', {
-        trialId: document.getElementById('trl-id').value || 'NEW_TRIAL',
-        base64Data: STATE.trialPhotoData.base64Data,
-        fileName: STATE.trialPhotoData.fileName,
-        mimeType: STATE.trialPhotoData.mimeType
-      });
-      uploadedUrl = upRes.url;
-      uploadedDriveId = upRes.fileId;
-    }
-
-    const itemPayload = {
-      Trial_ID: document.getElementById('trl-id').value || null,
-      Nama_Trial: document.getElementById('trl-nama').value,
-      Tujuan_Trial: document.getElementById('trl-tujuan').value,
-      Tanggal_Trial: document.getElementById('trl-tgl').value,
-      Item_Trial: document.getElementById('trl-item').value,
-      No_Lot: document.getElementById('trl-lot').value,
-      Qty: document.getElementById('trl-qty').value,
-      Flow_Trial_JSON: validFlow,
-      Hasil_Inspeksi_Status: document.getElementById('trl-hasil-status').value,
-      Qty_OK: document.getElementById('trl-qty-ok').value,
-      Qty_NG: document.getElementById('trl-qty-ng').value,
-      Detail_Hasil_Inspeksi: document.getElementById('trl-detail-hasil').value,
-      Kesimpulan_Trial: document.getElementById('trl-kesimpulan').value,
-      Next_Trial: document.getElementById('trl-next').value,
-      Status_Trial: document.getElementById('trl-status-doc').value
-    };
-
-    if (uploadedUrl) {
-      itemPayload.Bukti_Foto_URL = uploadedUrl;
-      itemPayload.Bukti_Foto_Drive_ID = uploadedDriveId;
-    }
-
-    const saveRes = await callGasApi('saveTrialReport', { item: itemPayload });
-    closeModal();
-    showToast('Activity Trial Report berhasil disimpan!', 'success');
-    await fetchBootstrapData(false);
-    if (saveRes.id) {
-      openTrialDetail(saveRes.id);
-    }
-  } catch (err) {
-    showToast(err.message, 'error');
-    btn.disabled = false;
-    btn.innerHTML = `<i data-lucide="save" class="w-4 h-4"></i> Simpan Trial Report`;
-    lucide.createIcons();
-  }
-}
-
-async function deleteTrialReport(trialId) {
-  if (!confirm('Hapus laporan trial ' + trialId + ' secara permanen?')) return;
-  try {
-    await callGasApi('deleteTrialReport', { id: trialId });
-    STATE.activeTrialId = null;
-    showToast('Laporan trial dihapus.', 'success');
-    fetchBootstrapData(false);
-  } catch (err) {
-    showToast(err.message, 'error');
-  }
-}
-
-/* ============================================================================
- * 7. VIEW: SCHEDULE & AGENDA
- * ============================================================================ */
-
-function renderSchedule(container) {
-  const canEdit = STATE.user.Role === 'Admin' || STATE.user.Role === 'Auditor';
-  container.innerHTML = `
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-      <div>
-        <p class="text-xs text-slate-500">Kalender operasional audit, inspeksi, dan tenggat kalibrasi.</p>
-      </div>
-      ${canEdit ? `
-        <button onclick="openScheduleModal()" class="px-4 py-2 bg-[#1E3A8A] hover:bg-blue-800 text-white text-xs font-semibold rounded-xl flex items-center gap-2 self-start">
-          <i data-lucide="plus" class="w-4 h-4"></i> Tambah Jadwal
-        </button>
-      ` : ''}
-    </div>
-
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-      ${STATE.data.schedules.map(s => `
-        <div class="bg-white dark:bg-[#1E293B] p-5 rounded-2xl border border-slate-200 dark:border-slate-800 flex flex-col justify-between gap-4">
-          <div>
-            <div class="flex items-center justify-between gap-2 mb-2">
-              <span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300">${escapeHtml(s.Kategori)}</span>
-              <span class="text-xs font-mono text-slate-400">${escapeHtml(s.Tanggal_Mulai)}</span>
-            </div>
-            <h4 class="font-bold text-sm text-slate-900 dark:text-white">${escapeHtml(s.Judul_Agenda)}</h4>
-            <p class="text-xs text-slate-500 mt-1"><i data-lucide="map-pin" class="w-3 h-3 inline mr-1"></i>${escapeHtml(s.Lokasi_Area || '-')}</p>
-            <p class="text-xs text-slate-500 mt-0.5"><i data-lucide="clock" class="w-3 h-3 inline mr-1"></i>${escapeHtml(s.Waktu_Mulai)} - ${escapeHtml(s.Waktu_Selesai)}</p>
-            ${s.Catatan ? `<p class="text-xs text-slate-400 mt-2 italic">"${escapeHtml(s.Catatan)}"</p>` : ''}
-          </div>
-          <div class="flex items-center justify-between pt-3 border-t border-slate-100 dark:border-slate-800">
-            <span class="text-[11px] font-medium text-slate-500">PIC: ${getUserName(s.PIC_User_ID)}</span>
-            ${canEdit ? `
-              <button onclick="deleteSchedule('${s.Schedule_ID}')" class="text-xs text-red-500 hover:underline">Hapus</button>
-            ` : ''}
-          </div>
-        </div>
-      `).join('') || '<p class="text-xs text-slate-400 col-span-full text-center py-8">Belum ada jadwal tersimpan.</p>'}
-    </div>
-  `;
-}
-
-function openScheduleModal() {
-  const userOptions = STATE.data.users.map(u => `<option value="${u.User_ID}">${escapeHtml(u.Nama_Lengkap)}</option>`).join('');
-  openModal('Tambah Jadwal Baru', `
-    <form id="schedule-form" class="space-y-3">
-      <div>
-        <label class="block text-xs font-semibold mb-1">Judul Agenda *</label>
-        <input type="text" id="sch-judul" required placeholder="Contoh: Audit Internal ISO 9001 Area Plating" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-      </div>
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-xs font-semibold mb-1">Kategori</label>
-          <select id="sch-kategori" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs">
-            <option value="Audit">Audit</option>
-            <option value="Trial">Activity Trial</option>
-            <option value="Kalibrasi">Kalibrasi</option>
-            <option value="Meeting">Meeting</option>
-            <option value="Deadline">Deadline</option>
-          </select>
-        </div>
-        <div>
-          <label class="block text-xs font-semibold mb-1">PIC</label>
-          <select id="sch-pic" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs">${userOptions}</select>
-        </div>
-      </div>
-      <div class="grid grid-cols-3 gap-2">
-        <div>
-          <label class="block text-xs font-semibold mb-1">Tanggal *</label>
-          <input type="date" id="sch-tgl" required value="${new Date().toISOString().slice(0, 10)}" class="w-full px-2 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-        </div>
-        <div>
-          <label class="block text-xs font-semibold mb-1">Mulai</label>
-          <input type="time" id="sch-mulai" value="08:30" class="w-full px-2 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-        </div>
-        <div>
-          <label class="block text-xs font-semibold mb-1">Selesai</label>
-          <input type="time" id="sch-selesai" value="11:30" class="w-full px-2 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-        </div>
-      </div>
-      <div>
-        <label class="block text-xs font-semibold mb-1">Lokasi / Line Produksi</label>
-        <input type="text" id="sch-lokasi" placeholder="Plant 1 - Ruang Lab QC" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-      </div>
-      <div>
-        <label class="block text-xs font-semibold mb-1">Catatan</label>
-        <textarea id="sch-catatan" rows="2" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs"></textarea>
-      </div>
-      <button type="submit" class="w-full py-2.5 bg-[#1E3A8A] text-white rounded-xl font-semibold text-xs">Simpan Jadwal</button>
-    </form>
-  `);
-
-  document.getElementById('schedule-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    try {
-      await callGasApi('saveSchedule', {
-        item: {
-          Judul_Agenda: document.getElementById('sch-judul').value,
-          Kategori: document.getElementById('sch-kategori').value,
-          PIC_User_ID: document.getElementById('sch-pic').value,
-          Tanggal_Mulai: document.getElementById('sch-tgl').value,
-          Waktu_Mulai: document.getElementById('sch-mulai').value,
-          Waktu_Selesai: document.getElementById('sch-selesai').value,
-          Lokasi_Area: document.getElementById('sch-lokasi').value,
-          Catatan: document.getElementById('sch-catatan').value
-        }
-      });
-      closeModal();
-      showToast('Jadwal berhasil ditambahkan.', 'success');
-      fetchBootstrapData(false);
-    } catch (err) {
-      showToast(err.message, 'error');
-    }
-  });
-}
-
-async function deleteSchedule(id) {
-  if (!confirm('Hapus jadwal ini?')) return;
-  try {
-    await callGasApi('deleteSchedule', { id });
-    showToast('Jadwal dihapus.', 'success');
-    fetchBootstrapData(false);
-  } catch (err) {
-    showToast(err.message, 'error');
-  }
-}
-
-/* ============================================================================
- * 8. VIEW: TASK MANAGER
- * ============================================================================ */
-
-function renderTasks(container) {
-  const cols = ['To Do', 'In Progress', 'Done'];
-  container.innerHTML = `
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-      <p class="text-xs text-slate-500">Pelacakan tugas harian, proyek QCC, dan tindak lanjut audit.</p>
-      <button onclick="openTaskModal()" class="px-4 py-2 bg-[#1E3A8A] hover:bg-blue-800 text-white text-xs font-semibold rounded-xl flex items-center gap-2 self-start">
-        <i data-lucide="plus" class="w-4 h-4"></i> Tugas Baru
-      </button>
-    </div>
-
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-      ${cols.map(status => {
-        const list = STATE.data.tasks.filter(t => t.Status === status);
-        return `
-          <div class="bg-slate-100/70 dark:bg-slate-900/50 p-4 rounded-2xl border border-slate-200/70 dark:border-slate-800 space-y-3">
-            <div class="flex items-center justify-between">
-              <h4 class="font-bold text-xs uppercase tracking-wider text-slate-600 dark:text-slate-300">${status}</h4>
-              <span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-white dark:bg-slate-800">${list.length}</span>
-            </div>
-            <div class="space-y-2.5">
-              ${list.map(t => `
-                <div class="bg-white dark:bg-[#1E293B] p-4 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xs space-y-2">
-                  <div class="flex items-center justify-between">
-                    <span class="px-2 py-0.5 rounded text-[10px] font-bold ${t.Prioritas === 'High' ? 'bg-red-100 text-red-700' : (t.Prioritas === 'Medium' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600')}">${escapeHtml(t.Prioritas)}</span>
-                    <span class="text-[11px] text-slate-400 font-mono">${escapeHtml(t.Deadline || '')}</span>
-                  </div>
-                  <p class="font-semibold text-xs text-slate-900 dark:text-white">${escapeHtml(t.Judul_Tugas)}</p>
-                  ${t.Deskripsi ? `<p class="text-[11px] text-slate-500 line-clamp-2">${escapeHtml(t.Deskripsi)}</p>` : ''}
-                  <div class="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800">
-                    <span class="text-[11px] text-slate-400">${getUserName(t.Assignee_User_ID)}</span>
-                    <div class="flex gap-1">
-                      ${status !== 'In Progress' ? `<button onclick="changeTaskStatus('${t.Task_ID}', 'In Progress')" class="px-2 py-1 rounded bg-blue-50 text-blue-700 text-[10px] font-semibold">Proses</button>` : ''}
-                      ${status !== 'Done' ? `<button onclick="changeTaskStatus('${t.Task_ID}', 'Done')" class="px-2 py-1 rounded bg-emerald-50 text-emerald-700 text-[10px] font-semibold">Selesai</button>` : ''}
-                    </div>
-                  </div>
-                </div>
-              `).join('') || '<p class="text-xs text-slate-400 text-center py-6">Kosong</p>'}
-            </div>
-          </div>
-        `;
-      }).join('')}
-    </div>
-  `;
-}
-
-function openTaskModal() {
-  const userOptions = STATE.data.users.map(u => `<option value="${u.User_ID}">${escapeHtml(u.Nama_Lengkap)}</option>`).join('');
-  openModal('Tambah Tugas Baru', `
-    <form id="task-form" class="space-y-3">
-      <div>
-        <label class="block text-xs font-semibold mb-1">Judul Tugas *</label>
-        <input type="text" id="tsk-judul" required placeholder="Contoh: Update Kalibrasi Mikrometer & Gauge" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-      </div>
-      <div>
-        <label class="block text-xs font-semibold mb-1">Deskripsi</label>
-        <textarea id="tsk-desc" rows="2" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs"></textarea>
-      </div>
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-xs font-semibold mb-1">Prioritas</label>
-          <select id="tsk-prio" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs">
-            <option value="High">High</option>
-            <option value="Medium" selected>Medium</option>
-            <option value="Low">Low</option>
-          </select>
-        </div>
-        <div>
-          <label class="block text-xs font-semibold mb-1">Deadline</label>
-          <input type="date" id="tsk-deadline" value="${new Date().toISOString().slice(0, 10)}" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-        </div>
-      </div>
-      <div>
-        <label class="block text-xs font-semibold mb-1">Ditugaskan Kepada (PIC)</label>
-        <select id="tsk-pic" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs">${userOptions}</select>
-      </div>
-      <button type="submit" class="w-full py-2.5 bg-[#1E3A8A] text-white rounded-xl font-semibold text-xs">Simpan Tugas</button>
-    </form>
-  `);
-
-  document.getElementById('task-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    try {
-      await callGasApi('saveTask', {
-        item: {
-          Judul_Tugas: document.getElementById('tsk-judul').value,
-          Deskripsi: document.getElementById('tsk-desc').value,
-          Prioritas: document.getElementById('tsk-prio').value,
-          Deadline: document.getElementById('tsk-deadline').value,
-          Assignee_User_ID: document.getElementById('tsk-pic').value
-        }
-      });
-      closeModal();
-      showToast('Tugas berhasil dibuat.', 'success');
-      fetchBootstrapData(false);
-    } catch (err) {
-      showToast(err.message, 'error');
-    }
-  });
-}
-
-async function changeTaskStatus(id, status) {
-  try {
-    await callGasApi('updateTaskStatus', { id, status });
-    showToast('Status tugas diperbarui.', 'success');
-    fetchBootstrapData(false);
-  } catch (err) {
-    showToast(err.message, 'error');
-  }
-}
-
-/* ============================================================================
- * 9. VIEW: AUDIT CENTER & LAPANGAN CHECKLIST
- * ============================================================================ */
-
-function renderAuditList(container) {
-  const canCreate = STATE.user.Role === 'Admin' || STATE.user.Role === 'Auditor';
-  container.innerHTML = `
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-      <p class="text-xs text-slate-500">Pelaksanaan audit internal ISO 9001:2015, Patrol 5R, dan audit proses.</p>
-      ${canCreate ? `
-        <button onclick="openNewAuditModal()" class="px-4 py-2 bg-[#1E3A8A] hover:bg-blue-800 text-white text-xs font-semibold rounded-xl flex items-center gap-2 self-start">
-          <i data-lucide="clipboard-plus" class="w-4 h-4"></i> Sesi Audit Baru
-        </button>
-      ` : ''}
-    </div>
-
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      ${STATE.data.audits.map(a => `
-        <div class="bg-white dark:bg-[#1E293B] p-5 rounded-2xl border border-slate-200 dark:border-slate-800 flex flex-col justify-between gap-4">
-          <div>
-            <div class="flex items-center justify-between mb-2">
-              <span class="font-mono text-xs font-semibold text-blue-600 dark:text-blue-400">${escapeHtml(a.Nomor_Dokumen)}</span>
-              <span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${a.Status_Audit === 'Completed' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">
-                ${escapeHtml(a.Status_Audit)}
-              </span>
-            </div>
-            <h4 class="font-bold text-sm">${escapeHtml(a.Judul_Audit)}</h4>
-            <p class="text-xs text-slate-500 mt-1">Standar: ${escapeHtml(a.Standar_Acuan)} • Area: ${escapeHtml(a.Area_Departemen)}</p>
-            <p class="text-xs text-slate-400 mt-0.5">Tanggal: ${escapeHtml(a.Tanggal_Audit)} • Auditee: ${escapeHtml(a.Auditee_PIC)}</p>
-          </div>
-
-          <div class="flex items-center justify-between pt-3 border-t border-slate-100 dark:border-slate-800">
-            <div>
-              <span class="text-[11px] text-slate-400 block">Skor Kepatuhan</span>
-              <span class="text-base font-bold tabular-nums text-slate-900 dark:text-white">${a.Score_Persen || 0}%</span>
-            </div>
-            <button onclick="openAuditSession('${a.Audit_ID}')" class="px-3.5 py-2 rounded-xl bg-slate-900 dark:bg-blue-600 text-white text-xs font-semibold hover:opacity-90">
-              ${a.Status_Audit === 'Completed' ? 'Lihat Laporan' : 'Isi Checklist'}
-            </button>
-          </div>
-        </div>
-      `).join('') || '<p class="text-xs text-slate-400 col-span-full text-center py-8">Belum ada sesi audit.</p>'}
-    </div>
-  `;
-}
-
-function openNewAuditModal() {
-  openModal('Buat Sesi Audit Baru', `
-    <form id="audit-new-form" class="space-y-3">
-      <div>
-        <label class="block text-xs font-semibold mb-1">Judul Audit *</label>
-        <input type="text" id="aud-judul" required placeholder="Audit Internal Q4 - Inspeksi & Lab" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-      </div>
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-xs font-semibold mb-1">Standar Acuan</label>
-          <select id="aud-standar" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs">
-            <option value="ISO 9001:2015">ISO 9001:2015</option>
-            <option value="Patrol 5R">Patrol 5R / Gemba</option>
-            <option value="Process Audit">Process Audit</option>
-          </select>
-        </div>
-        <div>
-          <label class="block text-xs font-semibold mb-1">Tanggal Audit</label>
-          <input type="date" id="aud-tgl" value="${new Date().toISOString().slice(0, 10)}" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-        </div>
-      </div>
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-xs font-semibold mb-1">Area / Departemen *</label>
-          <input type="text" id="aud-area" required placeholder="Quality Control / Plating" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-        </div>
-        <div>
-          <label class="block text-xs font-semibold mb-1">PIC Auditee</label>
-          <input type="text" id="aud-pic" placeholder="Nama PIC Area" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-        </div>
-      </div>
-      <button type="submit" class="w-full py-2.5 bg-[#1E3A8A] text-white rounded-xl font-semibold text-xs">Generate Checklist & Mulai</button>
-    </form>
-  `);
-
-  document.getElementById('audit-new-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    try {
-      const res = await callGasApi('createAuditSession', {
-        session: {
-          Judul_Audit: document.getElementById('aud-judul').value,
-          Standar_Acuan: document.getElementById('aud-standar').value,
-          Tanggal_Audit: document.getElementById('aud-tgl').value,
-          Area_Departemen: document.getElementById('aud-area').value,
-          Auditee_PIC: document.getElementById('aud-pic').value
-        }
-      });
-      closeModal();
-      showToast('Sesi audit berhasil dibuat!', 'success');
-      await fetchBootstrapData(false);
-      openAuditSession(res.auditId);
-    } catch (err) {
-      showToast(err.message, 'error');
-    }
-  });
-}
-
-function openAuditSession(auditId) {
-  STATE.activeAuditId = auditId;
-  renderCurrentRoute();
-}
-
-function renderAuditExecution(container, auditId) {
-  const audit = STATE.data.audits.find(a => a.Audit_ID === auditId);
-  const items = STATE.data.checklistItems.filter(i => i.Audit_ID === auditId);
-  if (!audit) return renderAuditList(container);
-
-  container.innerHTML = `
-    <div class="flex flex-wrap items-center justify-between gap-3 no-print">
-      <button onclick="openAuditSession(null)" class="text-xs font-semibold text-blue-600 flex items-center gap-1">
-        <i data-lucide="arrow-left" class="w-4 h-4"></i> Kembali ke Daftar Audit
-      </button>
-      <div class="flex gap-2">
-        <button onclick="window.print()" class="px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-semibold flex items-center gap-1">
-          <i data-lucide="printer" class="w-3.5 h-3.5"></i> Cetak Laporan
-        </button>
-        <button onclick="submitChecklistData(false)" class="px-3.5 py-2 rounded-xl bg-slate-800 text-white text-xs font-semibold">Simpan Draft</button>
-        <button onclick="submitChecklistData(true)" class="px-3.5 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold">Selesaikan & Generate CAPA</button>
-      </div>
-    </div>
-
-    <div class="bg-white dark:bg-[#1E293B] p-5 rounded-2xl border border-slate-200 dark:border-slate-800 print-only-clean">
-      <div class="flex flex-wrap justify-between gap-2">
-        <div>
-          <span class="font-mono text-xs text-blue-600 font-bold">${escapeHtml(audit.Nomor_Dokumen)} • ${escapeHtml(audit.Standar_Acuan)}</span>
-          <h3 class="text-lg font-bold mt-0.5">${escapeHtml(audit.Judul_Audit)}</h3>
-          <p class="text-xs text-slate-500">Area: ${escapeHtml(audit.Area_Departemen)} | Tanggal: ${escapeHtml(audit.Tanggal_Audit)} | Auditee: ${escapeHtml(audit.Auditee_PIC)}</p>
-        </div>
-        <div class="text-right">
-          <span class="text-xs text-slate-400">Skor Saat Ini</span>
-          <p class="text-2xl font-bold text-blue-600 tabular-nums">${audit.Score_Persen || 0}%</p>
-        </div>
-      </div>
-    </div>
-
-    <div class="space-y-4">
-      ${items.map((item, idx) => `
-        <div class="bg-white dark:bg-[#1E293B] p-5 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3 checklist-card print-only-clean" data-item-id="${item.Item_ID}">
-          <div class="flex items-start justify-between gap-2">
-            <div>
-              <span class="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 font-mono text-[11px] font-semibold">Klausul ${escapeHtml(item.Klausul)}</span>
-              <span class="text-xs font-semibold text-blue-600 ml-2">${escapeHtml(item.Kategori_Poin)}</span>
-              <p class="font-semibold text-sm mt-1.5">${idx + 1}. ${escapeHtml(item.Pertanyaan_Checklist)}</p>
-              <p class="text-xs text-slate-400 mt-0.5">Kriteria: ${escapeHtml(item.Kriteria_Penerimaan)}</p>
-            </div>
-          </div>
-
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
-            <div>
-              <label class="block text-[11px] font-semibold mb-1">Hasil Evaluasi</label>
-              <select class="chk-eval w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold">
-                <option value="Pending" ${item.Hasil_Evaluasi === 'Pending' ? 'selected' : ''}>⏳ Pending</option>
-                <option value="Conform" ${item.Hasil_Evaluasi === 'Conform' ? 'selected' : ''}>✅ Conform (OK)</option>
-                <option value="Non-Conform" ${item.Hasil_Evaluasi === 'Non-Conform' ? 'selected' : ''}>❌ Non-Conform (NG)</option>
-                <option value="N/A" ${item.Hasil_Evaluasi === 'N/A' ? 'selected' : ''}>➖ N/A</option>
-              </select>
-            </div>
-            <div>
-              <label class="block text-[11px] font-semibold mb-1">Kategori Temuan</label>
-              <select class="chk-sev w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs">
-                <option value="Observation" ${item.Severity === 'Observation' ? 'selected' : ''}>Observation (OFI)</option>
-                <option value="Minor" ${item.Severity === 'Minor' ? 'selected' : ''}>Minor NC</option>
-                <option value="Major" ${item.Severity === 'Major' ? 'selected' : ''}>Major NC</option>
-              </select>
-            </div>
-            <div class="no-print">
-              <label class="block text-[11px] font-semibold mb-1">Bukti Foto Lapangan</label>
-              <input type="file" accept="image/*" capture="environment" onchange="handleEvidenceUpload(event, '${auditId}', '${item.Item_ID}')" class="text-xs file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-blue-50 file:text-blue-700 file:font-semibold" />
-            </div>
-          </div>
-
-          <div>
-            <input type="text" class="chk-note w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs"
-              placeholder="Catatan objektif / bukti temuan..." value="${escapeHtml(item.Catatan_Temuan || '')}" />
-          </div>
-
-          ${item.Bukti_Foto_URL ? `
-            <div class="pt-1">
-              <a href="${item.Bukti_Foto_URL}" target="_blank" class="inline-flex items-center gap-1.5 text-xs text-blue-600 font-semibold hover:underline">
-                <i data-lucide="image" class="w-3.5 h-3.5"></i> Lihat Foto Bukti di Google Drive
-              </a>
-            </div>
-          ` : ''}
-        </div>
-      `).join('')}
-    </div>
-  `;
-}
-
-async function handleEvidenceUpload(event, auditId, itemId) {
-  const file = event.target.files[0];
-  if (!file) return;
-  showToast('Mengompres & mengunggah foto bukti...', 'info');
-
-  try {
-    const compressedBase64 = await compressImageToBase64(file, 1024, 0.78);
-    const res = await callGasApi('uploadAuditEvidence', {
-      auditId,
-      base64Data: compressedBase64,
-      fileName: `${itemId}_${Date.now()}.jpg`,
-      mimeType: 'image/jpeg'
-    });
-
-    const targetItem = STATE.data.checklistItems.find(i => i.Item_ID === itemId);
-    if (targetItem) {
-      targetItem.Bukti_Foto_URL = res.url;
-      targetItem.Bukti_Foto_Drive_ID = res.fileId;
-    }
-    showToast('Foto bukti berhasil diunggah ke Drive!', 'success');
-    renderCurrentRoute();
-  } catch (err) {
-    showToast('Gagal upload foto: ' + err.message, 'error');
-  }
-}
-
-async function submitChecklistData(finishAudit) {
-  const cards = document.querySelectorAll('.checklist-card');
-  const updates = [];
-  cards.forEach(card => {
-    const itemId = card.getAttribute('data-item-id');
-    const existing = STATE.data.checklistItems.find(i => i.Item_ID === itemId) || {};
-    updates.push({
-      Item_ID: itemId,
-      Hasil_Evaluasi: card.querySelector('.chk-eval').value,
-      Severity: card.querySelector('.chk-sev').value,
-      Catatan_Temuan: card.querySelector('.chk-note').value,
-      Bukti_Foto_URL: existing.Bukti_Foto_URL || '',
-      Bukti_Foto_Drive_ID: existing.Bukti_Foto_Drive_ID || ''
-    });
-  });
-
-  try {
-    const res = await callGasApi('saveAuditChecklist', {
-      auditId: STATE.activeAuditId,
-      items: updates,
-      finishAudit
-    });
-    showToast(finishAudit ? `Audit selesai! Skor: ${res.scorePersen}%` : 'Draft checklist tersimpan.', 'success');
-    if (finishAudit) STATE.activeAuditId = null;
-    fetchBootstrapData(false);
-  } catch (err) {
-    showToast(err.message, 'error');
-  }
-}
-
-/* ============================================================================
- * 10. VIEW: CAPA & TEMUAN
- * ============================================================================ */
-
-function renderCapa(container) {
-  container.innerHTML = `
-    <div>
-      <p class="text-xs text-slate-500">Daftar Non-Conformance Report (NCR) & tindakan perbaikan yang harus diverifikasi.</p>
-    </div>
-
-    <div class="space-y-4">
-      ${STATE.data.capas.map(c => `
-        <div class="bg-white dark:bg-[#1E293B] p-5 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3">
-          <div class="flex flex-wrap items-center justify-between gap-2">
-            <span class="font-mono text-xs font-bold text-red-600">${escapeHtml(c.Nomor_NCR)}</span>
-            <span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${c.Status_CAPA === 'Verified' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}">
-              ${escapeHtml(c.Status_CAPA)}
-            </span>
-          </div>
-          <p class="font-semibold text-sm">${escapeHtml(c.Uraian_Temuan)}</p>
-          <p class="text-xs text-slate-400">Due Date: ${escapeHtml(c.Target_Due_Date)} • PIC: ${getUserName(c.PIC_User_ID)}</p>
-          ${c.Root_Cause_Analysis ? `<p class="text-xs bg-slate-50 dark:bg-slate-900 p-2.5 rounded-xl"><strong>Root Cause:</strong> ${escapeHtml(c.Root_Cause_Analysis)}</p>` : ''}
-          ${c.Tindakan_Korektif ? `<p class="text-xs bg-slate-50 dark:bg-slate-900 p-2.5 rounded-xl"><strong>Corrective Action:</strong> ${escapeHtml(c.Tindakan_Korektif)}</p>` : ''}
-          <div class="pt-2 flex justify-end">
-            <button onclick="openCapaModal('${c.CAPA_ID}')" class="px-3.5 py-1.5 rounded-xl bg-[#1E3A8A] text-white text-xs font-semibold">Update CAPA</button>
-          </div>
-        </div>
-      `).join('') || '<p class="text-xs text-slate-400 text-center py-8">Tidak ada temuan CAPA aktif.</p>'}
-    </div>
-  `;
-}
-
-function openCapaModal(capaId) {
-  const c = STATE.data.capas.find(x => x.CAPA_ID === capaId);
-  if (!c) return;
-  openModal('Tindak Lanjut CAPA: ' + c.Nomor_NCR, `
-    <form id="capa-form" class="space-y-3">
-      <div>
-        <label class="block text-xs font-semibold mb-1">Analisis Akar Masalah (5-Whys / 4M)</label>
-        <textarea id="capa-rca" rows="2" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs">${escapeHtml(c.Root_Cause_Analysis || '')}</textarea>
-      </div>
-      <div>
-        <label class="block text-xs font-semibold mb-1">Tindakan Korektif (Corrective Action)</label>
-        <textarea id="capa-ca" rows="2" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs">${escapeHtml(c.Tindakan_Korektif || '')}</textarea>
-      </div>
-      <div>
-        <label class="block text-xs font-semibold mb-1">Tindakan Pencegahan (Preventive Action)</label>
-        <textarea id="capa-pa" rows="2" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs">${escapeHtml(c.Tindakan_Pencegahan || '')}</textarea>
-      </div>
-      <div>
-        <label class="block text-xs font-semibold mb-1">Status CAPA</label>
-        <select id="capa-status" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs">
-          <option value="Open" ${c.Status_CAPA === 'Open' ? 'selected' : ''}>Open</option>
-          <option value="In Progress" ${c.Status_CAPA === 'In Progress' ? 'selected' : ''}>In Progress</option>
-          <option value="Waiting Verification" ${c.Status_CAPA === 'Waiting Verification' ? 'selected' : ''}>Waiting Verification</option>
-          ${STATE.user.Role !== 'Auditee' ? `<option value="Verified" ${c.Status_CAPA === 'Verified' ? 'selected' : ''}>Verified (Closed)</option>` : ''}
-        </select>
-      </div>
-      <button type="submit" class="w-full py-2.5 bg-[#1E3A8A] text-white rounded-xl font-semibold text-xs">Simpan Perubahan CAPA</button>
-    </form>
-  `);
-
-  document.getElementById('capa-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    try {
-      await callGasApi('saveCapa', {
-        item: {
-          CAPA_ID: capaId,
-          Root_Cause_Analysis: document.getElementById('capa-rca').value,
-          Tindakan_Korektif: document.getElementById('capa-ca').value,
-          Tindakan_Pencegahan: document.getElementById('capa-pa').value,
-          Status_CAPA: document.getElementById('capa-status').value
-        }
-      });
-      closeModal();
-      showToast('Data CAPA berhasil diperbarui.', 'success');
-      fetchBootstrapData(false);
-    } catch (err) {
-      showToast(err.message, 'error');
-    }
-  });
-}
-
-/* ============================================================================
- * 11. VIEW: SETTINGS & PASSWORD CHANGE
- * ============================================================================ */
-
-function renderSettings(container) {
-  const u = STATE.user;
-  container.innerHTML = `
-    <div class="max-w-xl space-y-6">
-      <div class="bg-white dark:bg-[#1E293B] p-6 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3">
-        <h3 class="font-bold text-sm">Profil Pengguna Aktif</h3>
-        <div class="grid grid-cols-2 gap-3 text-xs">
-          <div><span class="text-slate-400 block">Nama Lengkap</span><span class="font-semibold">${escapeHtml(u.Nama_Lengkap)}</span></div>
-          <div><span class="text-slate-400 block">Username</span><span class="font-mono font-semibold">${escapeHtml(u.Username)}</span></div>
-          <div><span class="text-slate-400 block">Role Akses</span><span class="font-semibold">${escapeHtml(u.Role)}</span></div>
-          <div><span class="text-slate-400 block">Departemen</span><span class="font-semibold">${escapeHtml(u.Departemen)}</span></div>
-        </div>
-      </div>
-
-      <div class="bg-white dark:bg-[#1E293B] p-6 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4">
-        <h3 class="font-bold text-sm">Ganti Password Akun</h3>
-        <form id="change-pass-form" class="space-y-3">
-          <div>
-            <label class="block text-xs font-semibold mb-1">Password Lama</label>
-            <input type="password" id="old-pass" required class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-          </div>
-          <div>
-            <label class="block text-xs font-semibold mb-1">Password Baru (Minimal 6 Karakter)</label>
-            <input type="password" id="new-pass" required minlength="6" class="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent text-xs" />
-          </div>
-          <button type="submit" class="px-4 py-2.5 bg-[#1E3A8A] text-white rounded-xl font-semibold text-xs">Perbarui Password</button>
-        </form>
-      </div>
-
-      <div class="bg-white dark:bg-[#1E293B] p-6 rounded-2xl border border-slate-200 dark:border-slate-800 flex items-center justify-between">
-        <div>
-          <h3 class="font-bold text-sm text-red-600">Keluar dari Aplikasi</h3>
-          <p class="text-xs text-slate-400">Hapus sesi aktif pada perangkat ini.</p>
-        </div>
-        <button onclick="logoutUser()" class="px-4 py-2 bg-red-600 text-white rounded-xl text-xs font-semibold">Logout</button>
-      </div>
-    </div>
-  `;
-
-  document.getElementById('change-pass-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    try {
-      await callGasApi('changePassword', {
-        userId: u.User_ID,
-        oldPassword: document.getElementById('old-pass').value,
-        newPassword: document.getElementById('new-pass').value
-      });
-      e.target.reset();
-      showToast('Password berhasil diperbarui!', 'success');
-    } catch (err) {
-      showToast(err.message, 'error');
-    }
-  });
-}
-
-/* ============================================================================
- * 12. MODALS & HELPER UTILITIES
- * ============================================================================ */
-
-function openModal(title, htmlContent) {
-  document.getElementById('modal-title').textContent = title;
-  document.getElementById('modal-body').innerHTML = htmlContent;
-  document.getElementById('modal-backdrop').classList.remove('hidden');
-  lucide.createIcons();
-}
-
-function closeModal() {
-  document.getElementById('modal-backdrop').classList.add('hidden');
-}
-
-function openNotificationsModal() {
-  const list = (STATE.data.notifications || []).filter(n => n.User_ID === STATE.user.User_ID || n.User_ID === 'ALL').slice(-10).reverse();
-  openModal('Notifikasi & Pengingat', `
-    <div class="space-y-2.5">
-      ${list.map(n => `
-        <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
-          <p class="font-bold text-xs">${escapeHtml(n.Judul)}</p>
-          <p class="text-xs text-slate-500 mt-0.5">${escapeHtml(n.Pesan)}</p>
-        </div>
-      `).join('') || '<p class="text-xs text-slate-400 text-center py-6">Tidak ada notifikasi baru.</p>'}
-    </div>
-  `);
-}
-
-function getUserName(userId) {
-  const u = (STATE.data.users || []).find(x => x.User_ID === userId);
-  return u ? u.Nama_Lengkap : (userId || '-');
 }
 
 function escapeHtml(str) {
@@ -1660,24 +128,863 @@ function escapeHtml(str) {
     .replace(/'/g, '&#039;');
 }
 
-function compressImageToBase64(file, maxWidth, quality) {
-  return new Promise((resolve, reject) => {
+/* ============================================================================
+ * 3. AUTENTIKASI & ROLE-BASED UI
+ * ============================================================================ */
+
+function togglePasswordVisibility() {
+  const input = document.getElementById('login-password');
+  input.type = input.type === 'password' ? 'text' : 'password';
+}
+
+async function handleLoginSubmit(e) {
+  e.preventDefault();
+  const btn = document.getElementById('login-submit-btn');
+  const errBox = document.getElementById('login-error-box');
+  errBox.classList.add('hidden');
+
+  const username = document.getElementById('login-username').value.trim();
+  const password = document.getElementById('login-password').value;
+
+  btn.disabled = true;
+  btn.innerHTML = '<span>Memverifikasi...</span>';
+
+  try {
+    const res = await callApi('login', { username: username, password: password });
+    AppState.token = res.data.token;
+    AppState.user = res.data.user;
+
+    document.getElementById('login-password').value = '';
+    enterAppShell();
+    showToast('Selamat datang, ' + AppState.user.Nama_Lengkap, 'success');
+  } catch (err) {
+    document.getElementById('login-error-text').textContent = err.message;
+    errBox.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<span>Masuk ke Aplikasi</span><i data-lucide="arrow-right" class="w-4 h-4"></i>';
+    lucide.createIcons();
+  }
+}
+
+function enterAppShell() {
+  document.getElementById('login-view').classList.add('hidden');
+  document.getElementById('app-shell').classList.remove('hidden');
+
+  const u = AppState.user;
+  document.getElementById('sidebar-user-avatar').textContent = u.Nama_Lengkap.charAt(0).toUpperCase();
+  document.getElementById('sidebar-user-name').textContent = u.Nama_Lengkap;
+  document.getElementById('sidebar-user-role').textContent = u.Role + ' • ' + u.Departemen;
+  document.getElementById('mobile-role-badge').textContent = u.Role;
+
+  document.getElementById('prof-nama').textContent = u.Nama_Lengkap;
+  document.getElementById('prof-username').textContent = u.Username;
+  document.getElementById('prof-role').textContent = u.Role;
+  document.getElementById('prof-dept').textContent = u.Departemen;
+
+  document.querySelectorAll('.admin-only').forEach(function(el) {
+    el.classList.toggle('hidden', u.Role !== 'Admin');
+  });
+  document.querySelectorAll('.auditor-only').forEach(function(el) {
+    el.classList.toggle('hidden', u.Role === 'Auditee');
+  });
+  if (u.Role === 'Auditee') {
+    document.getElementById('nav-templates-desktop').classList.add('hidden');
+  } else {
+    document.getElementById('nav-templates-desktop').classList.remove('hidden');
+  }
+
+  navigateTo('dashboard');
+}
+
+function showLoginScreen() {
+  document.getElementById('app-shell').classList.add('hidden');
+  document.getElementById('login-view').classList.remove('hidden');
+}
+
+async function handleLogout() {
+  try {
+    await callApi('logout', {});
+  } catch (e) {}
+  AppState.token = null;
+  AppState.user = null;
+  showLoginScreen();
+  showToast('Anda telah keluar dari aplikasi.', 'success');
+}
+
+async function handleChangePasswordSubmit(e) {
+  e.preventDefault();
+  const oldPassword = document.getElementById('old-password').value;
+  const newPassword = document.getElementById('new-password').value;
+  try {
+    const res = await callApi('changePassword', { oldPassword: oldPassword, newPassword: newPassword });
+    document.getElementById('change-password-form').reset();
+    showToast(res.message, 'success');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+/* ============================================================================
+ * 4. ROUTING & NAVIGASI HALAMAN
+ * ============================================================================ */
+
+function navigateTo(route) {
+  AppState.currentRoute = route;
+
+  document.querySelectorAll('.page-view').forEach(function(sec) {
+    sec.classList.add('hidden');
+  });
+
+  const targetView = document.getElementById('view-' + route);
+  if (targetView) {
+    targetView.classList.remove('hidden');
+  }
+
+  let activeRoute = route;
+  if (route === 'audit-execute' || route === 'audit-report') activeRoute = 'audit';
+  if (route === 'trial-form' || route === 'trial-report') activeRoute = 'trials';
+
+  document.querySelectorAll('#desktop-nav .nav-link').forEach(function(btn) {
+    const isMatch = btn.getAttribute('data-route') === activeRoute;
+    btn.className = 'nav-link w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition ' +
+      (isMatch ? 'bg-brand-accent text-white shadow-xs' : 'text-blue-100 hover:bg-white/10');
+  });
+
+  document.querySelectorAll('#mobile-bottom-nav .nav-link').forEach(function(btn) {
+    const isMatch = btn.getAttribute('data-route') === activeRoute;
+    btn.className = 'nav-link flex flex-col items-center justify-center gap-1 text-[10px] font-semibold ' +
+      (isMatch ? 'text-brand-accent' : 'text-slate-400');
+  });
+
+  const titles = {
+    'dashboard': 'YUNAKO Hub',
+    'schedule': 'Schedule & Agenda',
+    'tasks': 'Task Tracker',
+    'audit': 'Audit Center',
+    'audit-execute': 'Eksekusi Audit',
+    'audit-report': 'Laporan Audit',
+    'trials': 'Activity Trial Report',
+    'trial-form': 'Form Trial Report',
+    'trial-report': 'Laporan Trial',
+    'templates': 'Master Template',
+    'settings': 'Pengaturan'
+  };
+  document.getElementById('mobile-header-title').textContent = titles[route] || 'YUNAKO Hub';
+
+  if (route === 'dashboard') loadDashboard();
+  if (route === 'schedule') loadSchedules();
+  if (route === 'tasks') loadTasks();
+  if (route === 'audit') loadAuditSessions();
+  if (route === 'trials') loadTrialReports();
+  if (route === 'templates') loadTemplates();
+  if (route === 'settings') loadSettingsData();
+
+  lucide.createIcons();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+/* ============================================================================
+ * 5. MODUL DASHBOARD
+ * ============================================================================ */
+
+async function loadDashboard() {
+  document.getElementById('dash-greeting').textContent = 'Halo, ' + AppState.user.Nama_Lengkap;
+  document.getElementById('dash-date').textContent = new Date().toLocaleDateString('id-ID', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+  });
+
+  try {
+    const res = await callApi('getDashboardData', {});
+    const d = res.data;
+    AppState.usersList = d.users || [];
+
+    document.getElementById('kpi-active-tasks').textContent = d.kpi.activeTasksCount;
+    document.getElementById('kpi-urgent-tasks').textContent = d.kpi.urgentTasksCount + ' prioritas tinggi/urgent';
+    document.getElementById('kpi-today-schedules').textContent = d.kpi.todaySchedulesCount;
+    document.getElementById('kpi-draft-audits').textContent = d.kpi.draftAuditsCount;
+    document.getElementById('kpi-avg-compliance').textContent = d.kpi.avgCompliance + '%';
+
+    const schEl = document.getElementById('dash-schedules-list');
+    if (!d.todaySchedules || d.todaySchedules.length === 0) {
+      schEl.innerHTML = '<div class="text-center py-6 text-xs text-brand-muted">Tidak ada agenda terjadwal hari ini.</div>';
+    } else {
+      schEl.innerHTML = d.todaySchedules.map(function(s) {
+        const isAudit = s.Kategori === 'Audit Terjadwal' && AppState.user.Role !== 'Auditee';
+        return '<div class="p-3 rounded-xl border border-brand-border bg-slate-50/70 flex items-center justify-between gap-3">' +
+          '<div class="min-w-0">' +
+            '<div class="flex items-center gap-2 mb-1">' +
+              '<span class="font-mono text-[11px] font-bold px-2 py-0.5 rounded bg-blue-100 text-brand-primary">' + escapeHtml(s.Waktu_Mulai) + '</span>' +
+              '<span class="text-[11px] font-semibold text-brand-muted">' + escapeHtml(s.Kategori) + '</span>' +
+            '</div>' +
+            '<div class="font-semibold text-sm text-brand-text truncate">' + escapeHtml(s.Judul_Agenda) + '</div>' +
+            '<div class="text-xs text-brand-muted truncate">Area: ' + escapeHtml(s.Lokasi_Area) + '</div>' +
+          '</div>' +
+          (isAudit ? '<button onclick="openNewAuditModal(\'' + escapeHtml(s.Schedule_ID) + '\', \'' + escapeHtml(s.Lokasi_Area) + '\')" class="shrink-0 px-3 py-2 rounded-lg bg-brand-accent text-white text-xs font-semibold">Mulai Audit</button>' : '') +
+        '</div>';
+      }).join('');
+    }
+
+    const tskEl = document.getElementById('dash-tasks-list');
+    if (!d.priorityTasks || d.priorityTasks.length === 0) {
+      tskEl.innerHTML = '<div class="text-center py-6 text-xs text-brand-muted">Semua tugas telah selesai!</div>';
+    } else {
+      tskEl.innerHTML = d.priorityTasks.map(function(t) {
+        const badgeColor = (t.Prioritas === 'Urgent' || t.Prioritas === 'High') ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600';
+        return '<div onclick="navigateTo(\'tasks\')" class="cursor-pointer p-3 rounded-xl border border-brand-border hover:border-blue-300 transition flex items-center justify-between gap-3">' +
+          '<div class="min-w-0">' +
+            '<div class="flex items-center gap-2 mb-1">' +
+              '<span class="text-[11px] font-bold px-2 py-0.5 rounded ' + badgeColor + '">' + escapeHtml(t.Prioritas) + '</span>' +
+              '<span class="font-mono text-[11px] text-brand-muted">Due: ' + escapeHtml(t.Due_Date) + '</span>' +
+            '</div>' +
+            '<div class="font-semibold text-sm text-brand-text truncate">' + escapeHtml(t.Judul_Tugas) + '</div>' +
+            '<div class="text-xs text-brand-muted">PIC: ' + escapeHtml(t.Assignee_Nama) + '</div>' +
+          '</div>' +
+          '<span class="shrink-0 text-xs font-semibold px-2.5 py-1 rounded-lg bg-amber-50 text-amber-700">' + escapeHtml(t.Status_Task) + '</span>' +
+        '</div>';
+      }).join('');
+    }
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+/* ============================================================================
+ * 6. MODUL SCHEDULE & CALENDAR
+ * ============================================================================ */
+
+async function loadSchedules() {
+  const container = document.getElementById('schedule-list-container');
+  container.innerHTML = '<div class="bg-white p-6 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Memuat jadwal...</div>';
+  try {
+    const res = await callApi('getSchedules', {});
+    AppState.schedules = res.data || [];
+    renderSchedules();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function setScheduleViewMode(mode) {
+  AppState.scheduleViewMode = mode;
+  document.getElementById('sch-view-list-btn').className = mode === 'list'
+    ? 'px-3 py-1.5 rounded-lg bg-white text-brand-primary shadow-xs'
+    : 'px-3 py-1.5 rounded-lg text-slate-600';
+  document.getElementById('sch-view-cal-btn').className = mode === 'calendar'
+    ? 'px-3 py-1.5 rounded-lg bg-white text-brand-primary shadow-xs'
+    : 'px-3 py-1.5 rounded-lg text-slate-600';
+
+  document.getElementById('schedule-list-container').classList.toggle('hidden', mode !== 'list');
+  document.getElementById('schedule-calendar-container').classList.toggle('hidden', mode !== 'calendar');
+  renderSchedules();
+}
+
+function filterSchedules(cat) {
+  AppState.scheduleCategoryFilter = cat;
+  document.querySelectorAll('.sch-filter-chip').forEach(function(btn) {
+    const active = btn.textContent === (cat === 'ALL' ? 'Semua' : cat);
+    btn.className = 'sch-filter-chip px-3.5 py-1.5 rounded-full text-xs font-semibold ' +
+      (active ? 'bg-brand-primary text-white' : 'bg-white border border-brand-border text-brand-muted');
+  });
+  renderSchedules();
+}
+
+function renderSchedules() {
+  const filtered = AppState.schedules.filter(function(s) {
+    return AppState.scheduleCategoryFilter === 'ALL' || s.Kategori === AppState.scheduleCategoryFilter;
+  });
+
+  const listEl = document.getElementById('schedule-list-container');
+  if (filtered.length === 0) {
+    listEl.innerHTML = '<div class="bg-white p-8 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Belum ada jadwal pada kategori ini.</div>';
+  } else {
+    listEl.innerHTML = filtered.map(function(s) {
+      const isAudit = s.Kategori === 'Audit Terjadwal';
+      const borderClass = isAudit ? 'border-l-4 border-l-brand-accent' : 'border-l-4 border-l-emerald-500';
+      const canEdit = AppState.user.Role !== 'Auditee';
+      return '<div class="bg-white p-4 rounded-2xl border border-brand-border ' + borderClass + ' shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">' +
+        '<div class="space-y-1">' +
+          '<div class="flex flex-wrap items-center gap-2">' +
+            '<span class="font-mono text-xs font-bold px-2 py-0.5 rounded bg-slate-100 text-brand-text">' + escapeHtml(s.Tanggal_Mulai) + ' • ' + escapeHtml(s.Waktu_Mulai) + '-' + escapeHtml(s.Waktu_Selesai) + '</span>' +
+            '<span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-brand-primary">' + escapeHtml(s.Kategori) + '</span>' +
+            '<span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">' + escapeHtml(s.Status_Agenda) + '</span>' +
+          '</div>' +
+          '<h3 class="font-bold text-base text-brand-text">' + escapeHtml(s.Judul_Agenda) + '</h3>' +
+          '<p class="text-xs text-brand-muted">Area: <strong>' + escapeHtml(s.Lokasi_Area) + '</strong> • PIC: ' + escapeHtml(s.PIC_Nama) + '</p>' +
+        '</div>' +
+        '<div class="flex items-center gap-2 shrink-0">' +
+          (isAudit && canEdit ? '<button onclick="openNewAuditModal(\'' + escapeHtml(s.Schedule_ID) + '\', \'' + escapeHtml(s.Lokasi_Area) + '\')" class="px-3.5 py-2 rounded-xl bg-brand-accent text-white text-xs font-semibold">Mulai Audit</button>' : '') +
+          (canEdit ? '<button onclick="deleteScheduleItem(\'' + escapeHtml(s.Schedule_ID) + '\')" class="p-2 rounded-xl border border-brand-border text-red-600 hover:bg-red-50" title="Hapus"><i data-lucide="trash-2" class="w-4 h-4"></i></button>' : '') +
+        '</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  const calEl = document.getElementById('schedule-calendar-container');
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  const firstDay = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const monthLabel = now.toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
+
+  let gridHtml = '<div class="font-bold text-base text-brand-text mb-3 capitalize">' + monthLabel + '</div>' +
+    '<div class="grid grid-cols-7 gap-1 text-center text-xs font-semibold text-brand-muted mb-2">' +
+    '<div>Min</div><div>Sen</div><div>Sel</div><div>Rab</div><div>Kam</div><div>Jum</div><div>Sab</div></div>' +
+    '<div class="grid grid-cols-7 gap-1">';
+
+  for (let empty = 0; empty < firstDay; empty++) {
+    gridHtml += '<div class="h-14 rounded-lg bg-slate-50/50"></div>';
+  }
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dateStr = year + '-' + ('0' + (month + 1)).slice(-2) + '-' + ('0' + d).slice(-2);
+    const dayEvents = filtered.filter(function(ev) { return ev.Tanggal_Mulai === dateStr; });
+    gridHtml += '<div class="h-14 p-1 rounded-lg border border-slate-100 flex flex-col justify-between">' +
+      '<span class="text-xs font-mono font-semibold">' + d + '</span>' +
+      (dayEvents.length > 0 ? '<span class="text-[10px] font-bold px-1 rounded bg-blue-100 text-brand-primary truncate">' + dayEvents.length + ' agenda</span>' : '') +
+    '</div>';
+  }
+  gridHtml += '</div>';
+  calEl.innerHTML = gridHtml;
+  lucide.createIcons();
+}
+
+function openScheduleModal() {
+  const today = new Date().toISOString().slice(0, 10);
+  const userOptions = AppState.usersList.map(function(u) {
+    return '<option value="' + escapeHtml(u.User_ID) + '">' + escapeHtml(u.Nama_Lengkap) + ' (' + u.Role + ')</option>';
+  }).join('');
+
+  openModal('Tambah Jadwal Baru',
+    '<form id="schedule-form" class="space-y-3">' +
+      '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Judul Agenda *</label>' +
+      '<input type="text" id="sch-judul" required placeholder="Contoh: Audit Internal Area QC" class="w-full px-3.5 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+      '<div class="grid grid-cols-2 gap-3">' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Kategori</label>' +
+        '<select id="sch-kategori" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm">' +
+          '<option value="Audit Terjadwal">Audit Terjadwal</option>' +
+          '<option value="Tugas Lapangan">Tugas Lapangan</option>' +
+          '<option value="Meeting">Meeting</option>' +
+          '<option value="Lainnya">Lainnya</option>' +
+        '</select></div>' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Tanggal *</label>' +
+        '<input type="date" id="sch-tanggal" value="' + today + '" required class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+      '</div>' +
+      '<div class="grid grid-cols-2 gap-3">' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Jam Mulai</label>' +
+        '<input type="time" id="sch-mulai" value="09:00" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Jam Selesai</label>' +
+        '<input type="time" id="sch-selesai" value="10:30" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+      '</div>' +
+      '<div class="grid grid-cols-2 gap-3">' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Lokasi / Area Audit</label>' +
+        '<input type="text" id="sch-lokasi" placeholder="Plant 1 / Lab Inspeksi" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">PIC</label>' +
+        '<select id="sch-pic" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm">' + userOptions + '</select></div>' +
+      '</div>' +
+      '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Catatan</label>' +
+      '<textarea id="sch-desc" rows="2" class="w-full px-3 py-2 rounded-xl border border-brand-border text-sm"></textarea></div>' +
+      '<button type="submit" class="w-full touch-target bg-brand-accent text-white font-semibold rounded-xl text-sm">Simpan Jadwal</button>' +
+    '</form>'
+  );
+
+  document.getElementById('schedule-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    try {
+      const res = await callApi('saveSchedule', {
+        Judul_Agenda: document.getElementById('sch-judul').value,
+        Kategori: document.getElementById('sch-kategori').value,
+        Tanggal_Mulai: document.getElementById('sch-tanggal').value,
+        Waktu_Mulai: document.getElementById('sch-mulai').value,
+        Waktu_Selesai: document.getElementById('sch-selesai').value,
+        Lokasi_Area: document.getElementById('sch-lokasi').value,
+        PIC_User_ID: document.getElementById('sch-pic').value,
+        Deskripsi: document.getElementById('sch-desc').value
+      });
+      closeModal();
+      showToast(res.message, 'success');
+      if (AppState.currentRoute === 'schedule') loadSchedules(); else loadDashboard();
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  });
+}
+
+async function deleteScheduleItem(scheduleId) {
+  if (!confirm('Hapus jadwal ini?')) return;
+  try {
+    const res = await callApi('deleteSchedule', { Schedule_ID: scheduleId });
+    showToast(res.message, 'success');
+    loadSchedules();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+/* ============================================================================
+ * 7. MODUL TASK TRACKER
+ * ============================================================================ */
+
+async function loadTasks() {
+  const container = document.getElementById('tasks-list-container');
+  container.innerHTML = '<div class="col-span-full bg-white p-6 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Memuat daftar tugas...</div>';
+  try {
+    const res = await callApi('getTasks', {});
+    AppState.tasks = res.data || [];
+    renderTasks();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function setTaskStatusFilter(status) {
+  AppState.taskStatusFilter = status;
+  document.querySelectorAll('.task-tab-btn').forEach(function(btn) {
+    const active = btn.textContent === (status === 'ALL' ? 'Semua' : status);
+    btn.className = 'task-tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold ' +
+      (active ? 'bg-brand-primary text-white' : 'bg-white border border-brand-border text-brand-muted');
+  });
+  renderTasks();
+}
+
+function renderTasks() {
+  const q = (document.getElementById('task-search-input').value || '').toLowerCase();
+  const filtered = AppState.tasks.filter(function(t) {
+    const matchStatus = AppState.taskStatusFilter === 'ALL' || t.Status_Task === AppState.taskStatusFilter;
+    const matchQuery = !q ||
+      String(t.Judul_Tugas).toLowerCase().indexOf(q) > -1 ||
+      String(t.Related_Audit_ID).toLowerCase().indexOf(q) > -1 ||
+      String(t.Assignee_Nama).toLowerCase().indexOf(q) > -1;
+    return matchStatus && matchQuery;
+  });
+
+  const container = document.getElementById('tasks-list-container');
+  if (filtered.length === 0) {
+    container.innerHTML = '<div class="col-span-full bg-white p-8 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Tidak ada tugas ditemukan.</div>';
+    return;
+  }
+
+  container.innerHTML = filtered.map(function(t) {
+    const prioBadge = (t.Prioritas === 'Urgent' || t.Prioritas === 'High')
+      ? 'bg-red-50 text-red-600'
+      : (t.Prioritas === 'Medium' ? 'bg-blue-50 text-blue-600' : 'bg-slate-100 text-slate-600');
+    const statusBadge = t.Status_Task === 'Done'
+      ? 'bg-emerald-50 text-emerald-700'
+      : (t.Status_Task === 'In Progress' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-700');
+
+    return '<div class="bg-white p-4 rounded-2xl border border-brand-border shadow-xs flex flex-col justify-between gap-3">' +
+      '<div>' +
+        '<div class="flex flex-wrap items-center justify-between gap-2 mb-2">' +
+          '<div class="flex items-center gap-1.5">' +
+            '<span class="font-mono text-[11px] text-brand-muted">' + escapeHtml(t.Task_ID) + '</span>' +
+            '<span class="text-[11px] font-bold px-2 py-0.5 rounded ' + prioBadge + '">' + escapeHtml(t.Prioritas) + '</span>' +
+          '</div>' +
+          '<span class="text-xs font-semibold px-2.5 py-0.5 rounded-full ' + statusBadge + '">' + escapeHtml(t.Status_Task) + '</span>' +
+        '</div>' +
+        (t.Related_Audit_ID ? '<div class="mb-1.5"><span class="font-mono text-[11px] px-2 py-0.5 rounded bg-red-50 text-red-700 border border-red-200">Temuan Audit: ' + escapeHtml(t.Related_Audit_ID) + '</span></div>' : '') +
+        '<h3 class="font-bold text-base text-brand-text mb-1">' + escapeHtml(t.Judul_Tugas) + '</h3>' +
+        '<p class="text-xs text-brand-muted whitespace-pre-line line-clamp-2">' + escapeHtml(t.Deskripsi) + '</p>' +
+      '</div>' +
+      '<div class="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">' +
+        '<div class="text-xs text-brand-muted">' +
+          '<div>PIC: <strong>' + escapeHtml(t.Assignee_Nama) + '</strong></div>' +
+          '<div class="font-mono text-[11px]">Due: ' + escapeHtml(t.Due_Date) + '</div>' +
+        '</div>' +
+        '<button onclick="openTaskProgressModal(\'' + escapeHtml(t.Task_ID) + '\')" class="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-blue-50 hover:text-brand-primary text-xs font-semibold transition">Update Progres</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function openTaskModal() {
+  const nextWeek = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+  const userOptions = AppState.usersList.map(function(u) {
+    return '<option value="' + escapeHtml(u.User_ID) + '">' + escapeHtml(u.Nama_Lengkap) + ' (' + u.Role + ')</option>';
+  }).join('');
+
+  openModal('Buat Tugas Baru',
+    '<form id="task-create-form" class="space-y-3">' +
+      '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Judul Tugas *</label>' +
+      '<input type="text" id="tsk-judul" required placeholder="Contoh: Perbarui label kalibrasi caliper" class="w-full px-3.5 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+      '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Deskripsi / Instruksi</label>' +
+      '<textarea id="tsk-desc" rows="3" class="w-full px-3.5 py-2 rounded-xl border border-brand-border text-sm"></textarea></div>' +
+      '<div class="grid grid-cols-2 gap-3">' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Prioritas</label>' +
+        '<select id="tsk-prio" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm">' +
+          '<option value="Medium">Medium</option>' +
+          '<option value="High">High</option>' +
+          '<option value="Urgent">Urgent</option>' +
+          '<option value="Low">Low</option>' +
+        '</select></div>' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Tenggat Waktu *</label>' +
+        '<input type="date" id="tsk-due" value="' + nextWeek + '" required class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+      '</div>' +
+      '<div><label class="block text-xs font-semibold text-brand-muted mb-1">PIC Pelaksana</label>' +
+      '<select id="tsk-assignee" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm">' + userOptions + '</select></div>' +
+      '<button type="submit" class="w-full touch-target bg-brand-accent text-white font-semibold rounded-xl text-sm">Simpan Tugas</button>' +
+    '</form>'
+  );
+
+  document.getElementById('task-create-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    try {
+      const res = await callApi('saveTask', {
+        Judul_Tugas: document.getElementById('tsk-judul').value,
+        Deskripsi: document.getElementById('tsk-desc').value,
+        Prioritas: document.getElementById('tsk-prio').value,
+        Due_Date: document.getElementById('tsk-due').value,
+        Assignee_User_ID: document.getElementById('tsk-assignee').value
+      });
+      closeModal();
+      showToast(res.message, 'success');
+      if (AppState.currentRoute === 'tasks') loadTasks(); else loadDashboard();
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  });
+}
+
+function openTaskProgressModal(taskId) {
+  const t = AppState.tasks.find(function(item) { return item.Task_ID === taskId; });
+  if (!t) return;
+
+  openModal('Update Progres Tugas',
+    '<form id="task-progress-form" class="space-y-3">' +
+      '<div class="p-3 rounded-xl bg-slate-50 border border-brand-border">' +
+        '<div class="font-mono text-xs text-brand-muted">' + escapeHtml(t.Task_ID) + '</div>' +
+        '<div class="font-bold text-sm text-brand-text mt-0.5">' + escapeHtml(t.Judul_Tugas) + '</div>' +
+        '<p class="text-xs text-brand-muted whitespace-pre-line mt-1">' + escapeHtml(t.Deskripsi) + '</p>' +
+      '</div>' +
+      '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Status Pengerjaan</label>' +
+      '<select id="tsk-upd-status" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm">' +
+        ['To Do', 'In Progress', 'Review', 'Done'].map(function(st) {
+          return '<option value="' + st + '"' + (t.Status_Task === st ? ' selected' : '') + '>' + st + '</option>';
+        }).join('') +
+      '</select></div>' +
+      '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Catatan Penyelesaian / Tindak Lanjut</label>' +
+      '<textarea id="tsk-upd-notes" rows="3" placeholder="Jelaskan tindakan perbaikan yang telah dilakukan..." class="w-full px-3 py-2 rounded-xl border border-brand-border text-sm">' + escapeHtml(t.Catatan_Penyelesaian || '') + '</textarea></div>' +
+      '<button type="submit" class="w-full touch-target bg-brand-accent text-white font-semibold rounded-xl text-sm">Simpan Perubahan</button>' +
+    '</form>'
+  );
+
+  document.getElementById('task-progress-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    try {
+      const res = await callApi('updateTaskStatus', {
+        Task_ID: t.Task_ID,
+        Status_Task: document.getElementById('tsk-upd-status').value,
+        Catatan_Penyelesaian: document.getElementById('tsk-upd-notes').value
+      });
+      closeModal();
+      showToast(res.message, 'success');
+      loadTasks();
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  });
+}
+
+/* ============================================================================
+ * 8. MODUL AUDIT SESSIONS, MOBILE EXECUTION & GOOGLE DRIVE CAMERA UPLOAD
+ * ============================================================================ */
+
+async function loadAuditSessions() {
+  const container = document.getElementById('audit-sessions-container');
+  container.innerHTML = '<div class="col-span-full bg-white p-6 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Memuat daftar sesi audit...</div>';
+  try {
+    const res = await callApi('getAuditSessions', {});
+    AppState.auditSessions = res.data || [];
+    renderAuditSessions();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function setAuditFilter(filter) {
+  AppState.auditFilter = filter;
+  document.querySelectorAll('.audit-filter-btn').forEach(function(btn) {
+    const labelMap = { 'ALL': 'Semua Sesi', 'Draft': 'Draft (Berjalan)', 'Submitted': 'Submitted (Selesai)' };
+    const active = btn.textContent === labelMap[filter];
+    btn.className = 'audit-filter-btn px-3.5 py-1.5 rounded-full text-xs font-semibold ' +
+      (active ? 'bg-brand-primary text-white' : 'bg-white border border-brand-border text-brand-muted');
+  });
+  renderAuditSessions();
+}
+
+function renderAuditSessions() {
+  const filtered = AppState.auditSessions.filter(function(s) {
+    return AppState.auditFilter === 'ALL' || s.Status_Audit === AppState.auditFilter;
+  });
+
+  const container = document.getElementById('audit-sessions-container');
+  if (filtered.length === 0) {
+    container.innerHTML = '<div class="col-span-full bg-white p-8 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Belum ada sesi audit. Klik "Mulai Audit Baru" untuk memulai pemeriksaan di HP.</div>';
+    return;
+  }
+
+  container.innerHTML = filtered.map(function(s) {
+    const isDraft = s.Status_Audit === 'Draft';
+    const canExecute = isDraft && AppState.user.Role !== 'Auditee';
+    const badgeClass = isDraft ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700';
+
+    return '<div class="bg-white p-4 rounded-2xl border border-brand-border shadow-xs flex flex-col justify-between gap-3">' +
+      '<div>' +
+        '<div class="flex items-center justify-between gap-2 mb-2">' +
+          '<span class="font-mono text-xs font-bold text-brand-primary">' + escapeHtml(s.Audit_ID) + '</span>' +
+          '<span class="text-xs font-semibold px-2.5 py-0.5 rounded-full ' + badgeClass + '">' + escapeHtml(s.Status_Audit) + '</span>' +
+        '</div>' +
+        '<h3 class="font-bold text-base text-brand-text">' + escapeHtml(s.Area_Objek_Audit) + '</h3>' +
+        '<p class="text-xs text-brand-muted mt-0.5">' + escapeHtml(s.Nama_Checklist) + '</p>' +
+        '<div class="text-xs text-brand-muted mt-2">Tanggal: <span class="font-mono">' + escapeHtml(s.Tanggal_Audit) + '</span> • Auditor: ' + escapeHtml(s.Auditor_Nama) + '</div>' +
+      '</div>' +
+      '<div class="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">' +
+        (isDraft
+          ? '<span class="text-xs text-amber-600 font-medium">Sedang berlangsung</span>'
+          : '<div class="font-mono text-sm font-bold text-emerald-600">Skor: ' + escapeHtml(s.Persentase_Kepatuhan) + '%</div>') +
+        (canExecute
+          ? '<button onclick="openAuditExecution(\'' + escapeHtml(s.Audit_ID) + '\')" class="px-4 py-2 rounded-xl bg-brand-accent text-white text-xs font-semibold">Lanjutkan Isi Audit</button>'
+          : '<button onclick="openAuditReport(\'' + escapeHtml(s.Audit_ID) + '\')" class="px-4 py-2 rounded-xl bg-slate-100 hover:bg-blue-50 text-brand-primary text-xs font-semibold">Lihat Laporan</button>') +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+async function openNewAuditModal(presetScheduleId, presetArea) {
+  try {
+    if (AppState.templates.length === 0) {
+      const tRes = await callApi('getAuditTemplates', {});
+      AppState.templates = tRes.data || [];
+    }
+    if (AppState.usersList.length === 0) {
+      const dRes = await callApi('getDashboardData', {});
+      AppState.usersList = dRes.data.users || [];
+    }
+
+    const tmplOptions = AppState.templates.map(function(t) {
+      return '<option value="' + escapeHtml(t.Template_ID) + '">' + escapeHtml(t.Nama_Checklist) + ' (' + t.Total_Items + ' item)</option>';
+    }).join('');
+
+    const auditeeOptions = '<option value="">-- Pilih Akun PIC (Opsional) --</option>' +
+      AppState.usersList.map(function(u) {
+        return '<option value="' + escapeHtml(u.User_ID) + '">' + escapeHtml(u.Nama_Lengkap) + ' (' + u.Departemen + ')</option>';
+      }).join('');
+
+    const today = new Date().toISOString().slice(0, 10);
+
+    openModal('Mulai Sesi Audit Baru',
+      '<form id="new-audit-form" class="space-y-3">' +
+        '<input type="hidden" id="aud-schedule-id" value="' + escapeHtml(presetScheduleId || '') + '" />' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Pilih Master Checklist *</label>' +
+        '<select id="aud-template" required class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm">' + tmplOptions + '</select></div>' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Area / Objek yang Diaudit *</label>' +
+        '<input type="text" id="aud-area" required value="' + escapeHtml(presetArea || '') + '" placeholder="Contoh: Line Tapping 2 / Lab Kalibrasi" class="w-full px-3.5 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+        '<div class="grid grid-cols-2 gap-3">' +
+          '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Tanggal Audit</label>' +
+          '<input type="date" id="aud-tanggal" value="' + today + '" required class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+          '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Nama PIC Auditee *</label>' +
+          '<input type="text" id="aud-auditee-nama" required placeholder="Nama PIC lapangan" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+        '</div>' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Tautkan ke Akun User (Untuk Auto-Task NG)</label>' +
+        '<select id="aud-auditee-uid" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm">' + auditeeOptions + '</select></div>' +
+        '<button type="submit" class="w-full touch-target bg-brand-accent text-white font-semibold rounded-xl text-sm">Buka Lembar Checklist Audit</button>' +
+      '</form>'
+    );
+
+    document.getElementById('new-audit-form').addEventListener('submit', async function(e) {
+      e.preventDefault();
+      try {
+        const res = await callApi('createAuditSession', {
+          Template_ID: document.getElementById('aud-template').value,
+          Schedule_ID: document.getElementById('aud-schedule-id').value,
+          Area_Objek_Audit: document.getElementById('aud-area').value,
+          Tanggal_Audit: document.getElementById('aud-tanggal').value,
+          Auditee_Nama: document.getElementById('aud-auditee-nama').value,
+          Auditee_User_ID: document.getElementById('aud-auditee-uid').value
+        });
+        closeModal();
+        showToast(res.message, 'success');
+        openAuditExecution(res.data.Audit_ID);
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    });
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function openAuditExecution(auditId) {
+  navigateTo('audit-execute');
+  const container = document.getElementById('exec-items-container');
+  container.innerHTML = '<div class="bg-white p-6 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Memuat lembar checklist audit...</div>';
+
+  try {
+    const res = await callApi('getAuditSessionDetail', { Audit_ID: auditId });
+    AppState.activeAuditDetail = res.data;
+    renderAuditExecution();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function updateExecutionProgressBar() {
+  const session = AppState.activeAuditDetail;
+  if (!session) return;
+  const total = session.answers.length;
+  const filled = session.answers.filter(function(a) { return a.Jawaban_Status !== 'PENDING'; }).length;
+  const pct = total > 0 ? Math.round((filled / total) * 100) : 0;
+
+  document.getElementById('exec-progress-text').textContent = filled + ' / ' + total + ' Item (' + pct + '%)';
+  document.getElementById('exec-progress-bar').style.width = pct + '%';
+}
+
+function renderAuditExecution() {
+  const s = AppState.activeAuditDetail;
+  if (!s) return;
+
+  document.getElementById('exec-audit-id').textContent = s.Audit_ID;
+  document.getElementById('exec-audit-area').textContent = s.Area_Objek_Audit;
+  document.getElementById('exec-audit-meta').textContent = s.Nama_Checklist + ' • Auditee: ' + s.Auditee_Nama;
+  document.getElementById('exec-summary-notes').value = s.Ringkasan_Temuan || '';
+  updateExecutionProgressBar();
+
+  const container = document.getElementById('exec-items-container');
+  container.innerHTML = s.answers.map(function(ans) {
+    const st = ans.Jawaban_Status;
+    const isNG = st === 'NG';
+    const cardBorder = isNG ? 'border-red-300 bg-red-50/20' : (st === 'OK' ? 'border-emerald-300' : 'border-brand-border');
+
+    const okBtnClass = st === 'OK'
+      ? 'bg-emerald-500 text-white border-emerald-500 shadow-xs'
+      : 'bg-white text-slate-700 border-brand-border hover:bg-emerald-50';
+    const ngBtnClass = st === 'NG'
+      ? 'bg-red-500 text-white border-red-500 shadow-xs'
+      : 'bg-white text-slate-700 border-brand-border hover:bg-red-50';
+    const naBtnClass = st === 'N/A'
+      ? 'bg-slate-600 text-white border-slate-600 shadow-xs'
+      : 'bg-white text-slate-700 border-brand-border hover:bg-slate-100';
+
+    return '<div id="card-item-' + ans.Item_ID + '" class="bg-white rounded-2xl border ' + cardBorder + ' p-4 shadow-xs space-y-3">' +
+      '<div class="flex flex-wrap items-center justify-between gap-2">' +
+        '<div class="flex items-center gap-2">' +
+          '<span class="w-7 h-7 rounded-lg bg-brand-primary text-white font-mono text-xs font-bold flex items-center justify-center">' + ans.Urutan + '</span>' +
+          (ans.Klausul_Ref ? '<span class="font-mono text-[11px] font-semibold px-2 py-0.5 rounded bg-slate-100 text-brand-muted">' + escapeHtml(ans.Klausul_Ref) + '</span>' : '') +
+        '</div>' +
+        (ans.Wajib_Foto ? '<span class="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">Wajib Foto</span>' : '') +
+      '</div>' +
+
+      '<div>' +
+        '<h3 class="font-bold text-sm md:text-base text-brand-text leading-snug">' + escapeHtml(ans.Pertanyaan_Audit) + '</h3>' +
+        (ans.Panduan_Kriteria ? '<p class="text-xs text-brand-muted mt-1">Kriteria: ' + escapeHtml(ans.Panduan_Kriteria) + '</p>' : '') +
+      '</div>' +
+
+      '<div class="grid grid-cols-3 gap-2">' +
+        '<button type="button" onclick="selectAuditOption(\'' + ans.Item_ID + '\', \'OK\')" class="touch-target rounded-xl border font-bold text-sm transition ' + okBtnClass + '">✓ OK</button>' +
+        '<button type="button" onclick="selectAuditOption(\'' + ans.Item_ID + '\', \'NG\')" class="touch-target rounded-xl border font-bold text-sm transition ' + ngBtnClass + '">✕ NG</button>' +
+        '<button type="button" onclick="selectAuditOption(\'' + ans.Item_ID + '\', \'N/A\')" class="touch-target rounded-xl border font-bold text-sm transition ' + naBtnClass + '">— N/A</button>' +
+      '</div>' +
+
+      '<div>' +
+        '<textarea id="note-' + ans.Item_ID + '" onblur="saveItemNote(\'' + ans.Item_ID + '\')" rows="2" placeholder="' + (isNG ? 'Wajib isi deskripsi temuan NG di lapangan...' : 'Catatan pemeriksaan (opsional)...') + '"' +
+        ' class="w-full p-2.5 rounded-xl border ' + (isNG ? 'border-red-300 bg-red-50/40' : 'border-brand-border') + ' text-xs focus:outline-none focus:ring-2 focus:ring-brand-accent">' + escapeHtml(ans.Catatan_Temuan || '') + '</textarea>' +
+      '</div>' +
+
+      '<div id="photo-box-' + ans.Item_ID + '" class="space-y-2">' +
+        renderPhotoBoxHtml(ans) +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  lucide.createIcons();
+}
+
+function renderPhotoBoxHtml(ans) {
+  if (ans.Bukti_Foto_URL) {
+    return '<div class="p-2.5 rounded-xl bg-slate-50 border border-brand-border flex items-center justify-between gap-3">' +
+      '<div class="flex items-center gap-3 min-w-0">' +
+        '<img src="' + escapeHtml(ans.Bukti_Foto_URL) + '" onclick="openLightbox(\'' + escapeHtml(ans.Bukti_Foto_URL) + '\')" alt="Bukti" class="w-14 h-14 rounded-lg object-cover border border-slate-200 cursor-pointer shrink-0" />' +
+        '<div class="min-w-0">' +
+          '<div class="text-xs font-semibold text-emerald-700">✓ Tersimpan di Google Drive</div>' +
+          '<button type="button" onclick="openLightbox(\'' + escapeHtml(ans.Bukti_Foto_URL) + '\')" class="text-[11px] text-brand-accent underline">Perbesar Foto</button>' +
+        '</div>' +
+      '</div>' +
+      '<label class="shrink-0 px-3 py-2 rounded-lg bg-white border border-brand-border text-xs font-semibold cursor-pointer hover:bg-slate-100">' +
+        'Ganti Foto' +
+        '<input type="file" accept="image/*" capture="environment" onchange="handleAuditPhotoInput(\'' + ans.Item_ID + '\', this)" class="hidden" />' +
+      '</label>' +
+    '</div>';
+  }
+
+  return '<label class="w-full touch-target rounded-xl border-2 border-dashed border-blue-300 bg-blue-50/40 hover:bg-blue-50 text-brand-primary text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer transition">' +
+    '<i data-lucide="camera" class="w-4 h-4"></i>' +
+    '<span>Ambil / Unggah Foto Bukti</span>' +
+    '<input type="file" accept="image/*" capture="environment" onchange="handleAuditPhotoInput(\'' + ans.Item_ID + '\', this)" class="hidden" />' +
+  '</label>';
+}
+
+async function selectAuditOption(itemId, status) {
+  const s = AppState.activeAuditDetail;
+  const ans = s.answers.find(function(a) { return a.Item_ID === itemId; });
+  if (!ans) return;
+
+  ans.Jawaban_Status = status;
+  const noteEl = document.getElementById('note-' + itemId);
+  if (noteEl) ans.Catatan_Temuan = noteEl.value;
+
+  renderAuditExecution();
+
+  try {
+    await callApi('saveAuditAnswer', {
+      Audit_ID: s.Audit_ID,
+      Item_ID: itemId,
+      Jawaban_Status: status,
+      Catatan_Temuan: ans.Catatan_Temuan
+    });
+  } catch (err) {
+    showToast('Gagal menyimpan jawaban: ' + err.message, 'error');
+  }
+}
+
+async function saveItemNote(itemId) {
+  const s = AppState.activeAuditDetail;
+  const ans = s.answers.find(function(a) { return a.Item_ID === itemId; });
+  const noteEl = document.getElementById('note-' + itemId);
+  if (!ans || !noteEl) return;
+
+  if (ans.Catatan_Temuan === noteEl.value) return;
+  ans.Catatan_Temuan = noteEl.value;
+
+  try {
+    await callApi('saveAuditAnswer', {
+      Audit_ID: s.Audit_ID,
+      Item_ID: itemId,
+      Jawaban_Status: ans.Jawaban_Status,
+      Catatan_Temuan: ans.Catatan_Temuan
+    });
+  } catch (err) {
+    showToast('Gagal menyimpan catatan: ' + err.message, 'error');
+  }
+}
+
+function compressImageFile(file, maxWidth, quality) {
+  return new Promise(function(resolve, reject) {
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = function(event) {
       const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
+      img.onload = function() {
         let width = img.width;
         let height = img.height;
         if (width > maxWidth) {
           height = Math.round((height * maxWidth) / width);
           width = maxWidth;
         }
+        const canvas = document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL('image/jpeg', quality));
+        const compressedBase64 = canvas.toDataURL('image/jpeg', quality);
+        resolve(compressedBase64);
       };
       img.onerror = reject;
       img.src = event.target.result;
@@ -1685,4 +992,723 @@ function compressImageToBase64(file, maxWidth, quality) {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+
+async function handleAuditPhotoInput(itemId, inputEl) {
+  const file = inputEl.files && inputEl.files[0];
+  if (!file) return;
+
+  const s = AppState.activeAuditDetail;
+  const ans = s.answers.find(function(a) { return a.Item_ID === itemId; });
+  const photoBox = document.getElementById('photo-box-' + itemId);
+
+  photoBox.innerHTML = '<div class="p-3 rounded-xl bg-blue-50 text-brand-primary text-xs font-semibold flex items-center justify-center gap-2">Mengompresi &amp; mengunggah foto ke Google Drive...</div>';
+
+  try {
+    const compressedBase64 = await compressImageFile(file, 1280, 0.75);
+    const res = await callApi('uploadAuditPhoto', {
+      Audit_ID: s.Audit_ID,
+      Item_ID: itemId,
+      mimeType: 'image/jpeg',
+      base64Data: compressedBase64
+    });
+
+    ans.Bukti_Foto_URL = res.data.Bukti_Foto_URL;
+    ans.Bukti_Foto_Drive_ID = res.data.Bukti_Foto_Drive_ID;
+    photoBox.innerHTML = renderPhotoBoxHtml(ans);
+    lucide.createIcons();
+    showToast('Foto bukti tersimpan ke Google Drive.', 'success');
+  } catch (err) {
+    photoBox.innerHTML = '<div class="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs space-y-2">' +
+      '<div>Gagal mengunggah foto: ' + escapeHtml(err.message) + '</div>' +
+      renderPhotoBoxHtml(ans) +
+    '</div>';
+    lucide.createIcons();
+  }
+}
+
+async function submitCurrentAudit() {
+  const s = AppState.activeAuditDetail;
+  if (!s) return;
+
+  if (!confirm('Selesaikan dan submit audit ini? Skor akhir akan dihitung dan hasil akan dikunci.')) return;
+
+  const btn = document.getElementById('exec-submit-btn');
+  btn.disabled = true;
+  btn.textContent = 'Memproses Submit...';
+
+  try {
+    const res = await callApi('submitAuditSession', {
+      Audit_ID: s.Audit_ID,
+      Ringkasan_Temuan: document.getElementById('exec-summary-notes').value,
+      autoCreateTasks: document.getElementById('exec-auto-task').checked
+    });
+    showToast(res.message + (res.data.createdTasksCount > 0 ? ' (' + res.data.createdTasksCount + ' Task perbaikan dibuat)' : ''), 'success');
+    openAuditReport(s.Audit_ID);
+  } catch (err) {
+    showToast(err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i data-lucide="send" class="w-4 h-4"></i><span>Submit Final Audit</span>';
+    lucide.createIcons();
+  }
+}
+
+/* ============================================================================
+ * 9. AUDIT REPORT & PRINT VIEW
+ * ============================================================================ */
+
+async function openAuditReport(auditId) {
+  navigateTo('audit-report');
+  const container = document.getElementById('report-document-container');
+  container.innerHTML = '<div class="text-center py-8 text-sm text-brand-muted">Menyusun laporan hasil audit...</div>';
+
+  try {
+    const res = await callApi('getAuditSessionDetail', { Audit_ID: auditId });
+    const s = res.data;
+
+    const okCount = s.answers.filter(function(a) { return a.Jawaban_Status === 'OK'; }).length;
+    const ngCount = s.answers.filter(function(a) { return a.Jawaban_Status === 'NG'; }).length;
+    const naCount = s.answers.filter(function(a) { return a.Jawaban_Status === 'N/A'; }).length;
+
+    container.innerHTML =
+      '<div class="border-b-2 border-brand-primary pb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">' +
+        '<div>' +
+          '<div class="text-xs font-bold uppercase tracking-wider text-brand-primary">YUNAKO Audit &amp; Task Hub</div>' +
+          '<h2 class="text-xl font-bold text-brand-text">LAPORAN HASIL AUDIT LAPANGAN</h2>' +
+        '</div>' +
+        '<div class="text-left sm:text-right font-mono text-xs">' +
+          '<div class="font-bold text-brand-primary">' + escapeHtml(s.Audit_ID) + '</div>' +
+          '<div class="text-brand-muted">Doc: ' + escapeHtml(s.Kode_Dokumen) + '</div>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs bg-slate-50 p-4 rounded-xl border border-brand-border">' +
+        '<div><span class="text-brand-muted block">Checklist</span><strong>' + escapeHtml(s.Nama_Checklist) + '</strong></div>' +
+        '<div><span class="text-brand-muted block">Area / Objek</span><strong>' + escapeHtml(s.Area_Objek_Audit) + '</strong></div>' +
+        '<div><span class="text-brand-muted block">Tanggal Audit</span><strong class="font-mono">' + escapeHtml(s.Tanggal_Audit) + '</strong></div>' +
+        '<div><span class="text-brand-muted block">Auditor / Auditee</span><strong>' + escapeHtml(s.Auditor_Nama) + ' / ' + escapeHtml(s.Auditee_Nama) + '</strong></div>' +
+      '</div>' +
+
+      '<div class="grid grid-cols-4 gap-2 text-center">' +
+        '<div class="p-3 rounded-xl bg-blue-50 border border-blue-200"><div class="text-[11px] font-semibold text-brand-primary">Skor Kepatuhan</div><div class="font-mono text-lg md:text-2xl font-bold text-brand-primary">' + escapeHtml(s.Persentase_Kepatuhan) + '%</div></div>' +
+        '<div class="p-3 rounded-xl bg-emerald-50 border border-emerald-200"><div class="text-[11px] font-semibold text-emerald-700">OK</div><div class="font-mono text-lg md:text-2xl font-bold text-emerald-700">' + okCount + '</div></div>' +
+        '<div class="p-3 rounded-xl bg-red-50 border border-red-200"><div class="text-[11px] font-semibold text-red-700">NG</div><div class="font-mono text-lg md:text-2xl font-bold text-red-700">' + ngCount + '</div></div>' +
+        '<div class="p-3 rounded-xl bg-slate-100 border border-slate-200"><div class="text-[11px] font-semibold text-slate-600">N/A</div><div class="font-mono text-lg md:text-2xl font-bold text-slate-700">' + naCount + '</div></div>' +
+      '</div>' +
+
+      '<div class="space-y-3">' +
+        s.answers.map(function(a) {
+          const stBadge = a.Jawaban_Status === 'OK'
+            ? 'bg-emerald-100 text-emerald-800'
+            : (a.Jawaban_Status === 'NG' ? 'bg-red-100 text-red-800' : 'bg-slate-100 text-slate-700');
+
+          return '<div class="p-3.5 rounded-xl border border-brand-border flex flex-col sm:flex-row justify-between gap-3">' +
+            '<div class="space-y-1 flex-1">' +
+              '<div class="flex items-center gap-2">' +
+                '<span class="font-mono text-xs font-bold">#' + a.Urutan + '</span>' +
+                '<span class="text-xs font-bold px-2 py-0.5 rounded ' + stBadge + '">' + escapeHtml(a.Jawaban_Status) + '</span>' +
+                (a.Task_ID_Terkait ? '<span class="font-mono text-[11px] px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">Task: ' + escapeHtml(a.Task_ID_Terkait) + '</span>' : '') +
+              '</div>' +
+              '<div class="font-semibold text-sm text-brand-text">' + escapeHtml(a.Pertanyaan_Audit) + '</div>' +
+              (a.Catatan_Temuan ? '<div class="text-xs text-brand-muted">Catatan: ' + escapeHtml(a.Catatan_Temuan) + '</div>' : '') +
+            '</div>' +
+            (a.Bukti_Foto_URL ? '<img src="' + escapeHtml(a.Bukti_Foto_URL) + '" onclick="openLightbox(\'' + escapeHtml(a.Bukti_Foto_URL) + '\')" class="w-20 h-20 rounded-lg object-cover border border-slate-200 cursor-pointer shrink-0" />' : '') +
+          '</div>';
+        }).join('') +
+      '</div>' +
+
+      (s.Ringkasan_Temuan ? '<div class="p-4 rounded-xl bg-slate-50 border border-brand-border text-xs"><strong>Kesimpulan Auditor:</strong><p class="mt-1 whitespace-pre-line">' + escapeHtml(s.Ringkasan_Temuan) + '</p></div>' : '');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+/* ============================================================================
+ * 10. MODUL ACTIVITY TRIAL REPORT (FITUR BARU)
+ * ============================================================================ */
+
+async function loadTrialReports() {
+  const container = document.getElementById('trials-list-container');
+  container.innerHTML = '<div class="col-span-full bg-white p-6 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Memuat daftar Activity Trial Report...</div>';
+  try {
+    const res = await callApi('getTrialReports', {});
+    AppState.trialReports = res.data || [];
+    renderTrialsList();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function renderTrialsList() {
+  const q = (document.getElementById('trial-search-input').value || '').toLowerCase();
+  const filtered = AppState.trialReports.filter(function(r) {
+    return !q ||
+      String(r.Nama_Trial).toLowerCase().indexOf(q) > -1 ||
+      String(r.Item_Trial).toLowerCase().indexOf(q) > -1 ||
+      String(r.No_Lot).toLowerCase().indexOf(q) > -1;
+  });
+
+  const container = document.getElementById('trials-list-container');
+  if (filtered.length === 0) {
+    container.innerHTML = '<div class="col-span-full bg-white p-8 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Belum ada laporan trial. Klik <strong>Buat Laporan Trial</strong> untuk mendokumentasikan aktivitas trial Anda.</div>';
+    return;
+  }
+
+  container.innerHTML = filtered.map(function(r) {
+    const decisionClass = r.Status_Keputusan === 'PASS / OK'
+      ? 'bg-emerald-50 text-emerald-700'
+      : (r.Status_Keputusan === 'FAIL / NG' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700');
+
+    const trialAreaStep = (r.Flow_Steps || []).find(function(st) { return st.isTrial; });
+    const trialAreaName = trialAreaStep ? trialAreaStep.step : '-';
+
+    return '<div class="bg-white p-4 rounded-2xl border border-brand-border shadow-xs flex flex-col justify-between gap-3">' +
+      '<div class="space-y-1.5">' +
+        '<div class="flex items-center justify-between gap-2">' +
+          '<span class="font-mono text-xs font-bold text-brand-primary">' + escapeHtml(r.Trial_ID) + '</span>' +
+          '<span class="text-xs font-bold px-2.5 py-0.5 rounded-full ' + decisionClass + '">' + escapeHtml(r.Status_Keputusan) + '</span>' +
+        '</div>' +
+        '<h3 class="font-bold text-base text-brand-text leading-snug">' + escapeHtml(r.Nama_Trial) + '</h3>' +
+        '<div class="text-xs text-brand-muted">Item: <strong>' + escapeHtml(r.Item_Trial) + '</strong> • Lot: <span class="font-mono">' + escapeHtml(r.No_Lot) + '</span> (' + r.Qty_Trial + ' pcs)</div>' +
+        '<div class="flex flex-wrap gap-1.5 pt-1">' +
+          '<span class="text-[11px] font-semibold px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">Area Trial: ' + escapeHtml(trialAreaName) + '</span>' +
+          '<span class="text-[11px] font-semibold px-2 py-0.5 rounded bg-blue-50 text-brand-primary">Larutan: ' + escapeHtml(r.Konsentrasi_Trial) + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">' +
+        '<div class="text-xs font-mono">' +
+          '<span class="text-emerald-700 font-bold">OK: ' + r.Qty_OK + '</span> / ' +
+          '<span class="text-red-600 font-bold">NG: ' + r.Qty_NG + '</span>' +
+        '</div>' +
+        '<button onclick="openTrialReportView(\'' + escapeHtml(r.Trial_ID) + '\')" class="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-blue-50 text-brand-primary text-xs font-semibold">Lihat &amp; Cetak Report</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function openTrialForm(existingTrial) {
+  navigateTo('trial-form');
+  const today = new Date().toISOString().slice(0, 10);
+  AppState.trialPendingPhotoBase64 = null;
+
+  if (existingTrial) {
+    document.getElementById('trial-form-badge').textContent = 'EDIT: ' + existingTrial.Trial_ID;
+    document.getElementById('trl-id').value = existingTrial.Trial_ID;
+    document.getElementById('trl-nama').value = existingTrial.Nama_Trial || '';
+    document.getElementById('trl-tujuan').value = existingTrial.Tujuan_Trial || '';
+    document.getElementById('trl-tanggal').value = existingTrial.Tanggal_Trial || today;
+    document.getElementById('trl-item').value = existingTrial.Item_Trial || '';
+    document.getElementById('trl-lot').value = existingTrial.No_Lot || '';
+    document.getElementById('trl-qty').value = existingTrial.Qty_Trial || 50;
+    document.getElementById('trl-kons-std').value = existingTrial.Konsentrasi_Standar || '';
+    document.getElementById('trl-kons-trial').value = existingTrial.Konsentrasi_Trial || '';
+    document.getElementById('trl-param-lain').value = existingTrial.Parameter_Proses_Lain || '';
+    document.getElementById('trl-qty-ok').value = existingTrial.Qty_OK || 0;
+    document.getElementById('trl-qty-ng').value = existingTrial.Qty_NG || 0;
+    document.getElementById('trl-catatan-visual').value = existingTrial.Catatan_Visual || '';
+    document.getElementById('trl-keputusan').value = existingTrial.Status_Keputusan || 'PASS / OK';
+    document.getElementById('trl-kesimpulan').value = existingTrial.Kesimpulan_Trial || '';
+    document.getElementById('trl-next').value = existingTrial.Next_Trial_Plan || '';
+
+    AppState.trialFlowSteps = Array.isArray(existingTrial.Flow_Steps) && existingTrial.Flow_Steps.length > 0
+      ? existingTrial.Flow_Steps
+      : [{ step: 'Degreasing', isTrial: false }, { step: 'Pickling', isTrial: true }, { step: 'Plating', isTrial: false }];
+    AppState.trialExistingPhotoUrl = existingTrial.Foto_Bukti_URL || '';
+  } else {
+    document.getElementById('trial-form-badge').textContent = 'TRIAL BARU';
+    document.getElementById('trial-report-form').reset();
+    document.getElementById('trl-id').value = '';
+    document.getElementById('trl-tanggal').value = today;
+    document.getElementById('trl-qty').value = 50;
+    document.getElementById('trl-qty-ok').value = 50;
+    document.getElementById('trl-qty-ng').value = 0;
+    AppState.trialFlowSteps = [
+      { step: 'Degreasing', isTrial: false },
+      { step: 'Pickling', isTrial: true },
+      { step: 'Water Rinse', isTrial: false },
+      { step: 'Plating', isTrial: false }
+    ];
+    AppState.trialExistingPhotoUrl = '';
+  }
+
+  renderTrialPhotoPreview();
+  recalcTrialVisualStats();
+  renderTrialFlowEditor();
+}
+
+function addTrialFlowStep() {
+  AppState.trialFlowSteps.push({ step: '', isTrial: false });
+  renderTrialFlowEditor();
+}
+
+function removeTrialFlowStep(idx) {
+  if (AppState.trialFlowSteps.length <= 1) return;
+  AppState.trialFlowSteps.splice(idx, 1);
+  renderTrialFlowEditor();
+}
+
+function updateTrialFlowStepName(idx, val) {
+  AppState.trialFlowSteps[idx].step = val;
+  renderTrialFlowPreviewOnly();
+}
+
+function toggleTrialFlowArea(idx) {
+  AppState.trialFlowSteps[idx].isTrial = !AppState.trialFlowSteps[idx].isTrial;
+  renderTrialFlowEditor();
+}
+
+function renderTrialFlowPreviewOnly() {
+  const previewEl = document.getElementById('trl-flow-preview');
+  previewEl.innerHTML = AppState.trialFlowSteps.map(function(st, i) {
+    const label = st.step.trim() || ('Tahap ' + (i + 1));
+    const boxHtml = st.isTrial
+      ? '<div class="px-3 py-2 rounded-xl bg-amber-100 border-2 border-amber-500 text-amber-950 shadow-xs">' +
+          '<div class="text-[10px] font-extrabold uppercase tracking-wider text-amber-700">★ AREA TRIAL</div>' +
+          '<div class="text-xs font-bold">' + (i + 1) + '. ' + escapeHtml(label) + '</div>' +
+        '</div>'
+      : '<div class="px-3 py-2 rounded-xl bg-white border border-brand-border text-brand-text">' +
+          '<div class="text-[10px] text-brand-muted">Proses Standar</div>' +
+          '<div class="text-xs font-semibold">' + (i + 1) + '. ' + escapeHtml(label) + '</div>' +
+        '</div>';
+
+    const arrow = (i < AppState.trialFlowSteps.length - 1)
+      ? '<span class="text-slate-400 font-bold text-sm">→</span>'
+      : '';
+    return boxHtml + arrow;
+  }).join('');
+}
+
+function renderTrialFlowEditor() {
+  renderTrialFlowPreviewOnly();
+  const editorEl = document.getElementById('trl-flow-steps-editor');
+  editorEl.innerHTML = AppState.trialFlowSteps.map(function(st, idx) {
+    const toggleBtnClass = st.isTrial
+      ? 'bg-amber-500 text-white border-amber-500'
+      : 'bg-white text-brand-muted border-brand-border hover:bg-amber-50';
+
+    return '<div class="flex items-center gap-2">' +
+      '<span class="w-6 text-center font-mono text-xs font-bold text-brand-muted">' + (idx + 1) + '.</span>' +
+      '<input type="text" value="' + escapeHtml(st.step) + '" oninput="updateTrialFlowStepName(' + idx + ', this.value)" placeholder="Nama proses (misal: Degreasing, Pickling...)"' +
+      ' class="flex-1 px-3 py-2 rounded-xl border border-brand-border text-xs font-medium" />' +
+      '<button type="button" onclick="toggleTrialFlowArea(' + idx + ')" class="px-3 py-2 rounded-xl border text-xs font-bold shrink-0 transition ' + toggleBtnClass + '">' +
+        (st.isTrial ? '★ Area Trial' : 'Tandai Trial') +
+      '</button>' +
+      '<button type="button" onclick="removeTrialFlowStep(' + idx + ')" class="p-2 text-red-500 hover:bg-red-50 rounded-lg" title="Hapus tahap">' +
+        '<i data-lucide="x" class="w-4 h-4"></i>' +
+      '</button>' +
+    '</div>';
+  }).join('');
+  lucide.createIcons();
+}
+
+function recalcTrialVisualStats() {
+  const total = Number(document.getElementById('trl-qty').value || 0);
+  const ok = Number(document.getElementById('trl-qty-ok').value || 0);
+  const rate = total > 0 ? Math.round((ok / total) * 1000) / 10 : 0;
+  document.getElementById('trl-yield-badge').textContent = rate + '% OK';
+}
+
+function renderTrialPhotoPreview() {
+  const box = document.getElementById('trl-photo-preview-box');
+  const src = AppState.trialPendingPhotoBase64 || AppState.trialExistingPhotoUrl;
+  if (!src) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = '<div class="p-2.5 rounded-xl bg-slate-50 border border-brand-border flex items-center gap-3">' +
+    '<img src="' + escapeHtml(src) + '" onclick="openLightbox(\'' + escapeHtml(src) + '\')" class="w-16 h-16 rounded-lg object-cover border border-slate-200 cursor-pointer" />' +
+    '<div class="text-xs">' +
+      '<div class="font-semibold text-emerald-700">' + (AppState.trialPendingPhotoBase64 ? 'Foto siap diunggah saat simpan' : 'Tersimpan di Google Drive') + '</div>' +
+      '<button type="button" onclick="openLightbox(\'' + escapeHtml(src) + '\')" class="text-brand-accent underline">Klik untuk perbesar</button>' +
+    '</div>' +
+  '</div>';
+}
+
+async function previewSelectedTrialPhoto(inputEl) {
+  const file = inputEl.files && inputEl.files[0];
+  if (!file) return;
+  try {
+    AppState.trialPendingPhotoBase64 = await compressImageFile(file, 1280, 0.75);
+    renderTrialPhotoPreview();
+  } catch (err) {
+    showToast('Gagal memproses foto: ' + err.message, 'error');
+  }
+}
+
+async function handleTrialFormSubmit(e) {
+  e.preventDefault();
+  const btn = document.getElementById('trl-submit-btn');
+  btn.disabled = true;
+  btn.textContent = 'Menyimpan Laporan Trial...';
+
+  const cleanSteps = AppState.trialFlowSteps
+    .filter(function(s) { return s.step.trim() !== ''; })
+    .map(function(s) { return { step: s.step.trim(), isTrial: Boolean(s.isTrial) }; });
+
+  try {
+    const res = await callApi('saveTrialReport', {
+      Trial_ID: document.getElementById('trl-id').value,
+      Nama_Trial: document.getElementById('trl-nama').value,
+      Tujuan_Trial: document.getElementById('trl-tujuan').value,
+      Tanggal_Trial: document.getElementById('trl-tanggal').value,
+      Item_Trial: document.getElementById('trl-item').value,
+      No_Lot: document.getElementById('trl-lot').value,
+      Qty_Trial: Number(document.getElementById('trl-qty').value || 0),
+      Flow_Steps: cleanSteps,
+      Konsentrasi_Standar: document.getElementById('trl-kons-std').value,
+      Konsentrasi_Trial: document.getElementById('trl-kons-trial').value,
+      Parameter_Proses_Lain: document.getElementById('trl-param-lain').value,
+      Qty_OK: Number(document.getElementById('trl-qty-ok').value || 0),
+      Qty_NG: Number(document.getElementById('trl-qty-ng').value || 0),
+      Catatan_Visual: document.getElementById('trl-catatan-visual').value,
+      Status_Keputusan: document.getElementById('trl-keputusan').value,
+      Kesimpulan_Trial: document.getElementById('trl-kesimpulan').value,
+      Next_Trial_Plan: document.getElementById('trl-next').value
+    });
+
+    const savedTrialId = res.data.Trial_ID;
+
+    if (AppState.trialPendingPhotoBase64) {
+      btn.textContent = 'Mengunggah Foto ke Drive...';
+      await callApi('uploadTrialPhoto', {
+        Trial_ID: savedTrialId,
+        mimeType: 'image/jpeg',
+        base64Data: AppState.trialPendingPhotoBase64
+      });
+      AppState.trialPendingPhotoBase64 = null;
+    }
+
+    showToast(res.message, 'success');
+    openTrialReportView(savedTrialId);
+  } catch (err) {
+    showToast(err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Simpan Activity Trial Report';
+  }
+}
+
+async function openTrialReportView(trialId) {
+  navigateTo('trial-report');
+  const container = document.getElementById('trial-report-document');
+  container.innerHTML = '<div class="text-center py-8 text-sm text-brand-muted">Menyusun Activity Trial Report...</div>';
+
+  try {
+    const res = await callApi('getTrialReportDetail', { Trial_ID: trialId });
+    const r = res.data;
+
+    const editBtn = document.getElementById('trl-report-edit-btn');
+    editBtn.onclick = function() { openTrialForm(r); };
+
+    const total = Number(r.Qty_Trial || 0);
+    const okPct = total > 0 ? Math.round((Number(r.Qty_OK || 0) / total) * 1000) / 10 : 0;
+
+    const flowHtml = (r.Flow_Steps || []).map(function(st, i) {
+      const box = st.isTrial
+        ? '<div class="px-3.5 py-2.5 rounded-xl bg-amber-100 border-2 border-amber-500 text-amber-950">' +
+            '<div class="text-[10px] font-extrabold uppercase tracking-wider text-amber-700">★ AREA TRIAL</div>' +
+            '<div class="text-xs font-bold">' + (i + 1) + '. ' + escapeHtml(st.step) + '</div>' +
+          '</div>'
+        : '<div class="px-3.5 py-2.5 rounded-xl bg-slate-50 border border-brand-border text-brand-text">' +
+            '<div class="text-[10px] text-brand-muted">Standar</div>' +
+            '<div class="text-xs font-semibold">' + (i + 1) + '. ' + escapeHtml(st.step) + '</div>' +
+          '</div>';
+      const arrow = (i < r.Flow_Steps.length - 1) ? '<span class="text-slate-400 font-bold">→</span>' : '';
+      return box + arrow;
+    }).join('');
+
+    const badgeColor = r.Status_Keputusan === 'PASS / OK'
+      ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+      : (r.Status_Keputusan === 'FAIL / NG' ? 'bg-red-100 text-red-800 border-red-300' : 'bg-amber-100 text-amber-800 border-amber-300');
+
+    container.innerHTML =
+      '<div class="border-b-2 border-brand-primary pb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">' +
+        '<div>' +
+          '<div class="text-xs font-bold uppercase tracking-wider text-brand-primary">YUNAKO Audit &amp; Task Hub</div>' +
+          '<h2 class="text-xl font-bold text-brand-text">ACTIVITY TRIAL REPORT</h2>' +
+        '</div>' +
+        '<div class="text-left sm:text-right font-mono text-xs">' +
+          '<div class="font-bold text-brand-primary">' + escapeHtml(r.Trial_ID) + '</div>' +
+          '<div class="text-brand-muted">PIC: ' + escapeHtml(r.Creator_Nama) + '</div>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="space-y-2">' +
+        '<h3 class="text-base font-bold text-brand-text">' + escapeHtml(r.Nama_Trial) + '</h3>' +
+        '<p class="text-xs text-brand-muted"><strong>Tujuan Trial:</strong> ' + escapeHtml(r.Tujuan_Trial) + '</p>' +
+        '<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs bg-slate-50 p-3.5 rounded-xl border border-brand-border mt-2">' +
+          '<div><span class="text-brand-muted block">Tanggal Trial</span><strong class="font-mono">' + escapeHtml(r.Tanggal_Trial) + '</strong></div>' +
+          '<div><span class="text-brand-muted block">Item Trial</span><strong>' + escapeHtml(r.Item_Trial) + '</strong></div>' +
+          '<div><span class="text-brand-muted block">Nomor Lot</span><strong class="font-mono">' + escapeHtml(r.No_Lot) + '</strong></div>' +
+          '<div><span class="text-brand-muted block">Qty Sampel</span><strong class="font-mono">' + r.Qty_Trial + ' pcs</strong></div>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="space-y-2">' +
+        '<div class="text-xs font-bold uppercase tracking-wider text-brand-primary">Flow Trial &amp; Penanda Area Trial</div>' +
+        '<div class="flex flex-wrap items-center gap-2 p-3 rounded-xl border border-brand-border">' + flowHtml + '</div>' +
+      '</div>' +
+
+      '<div class="space-y-2">' +
+        '<div class="text-xs font-bold uppercase tracking-wider text-brand-primary">Parameter Proses &amp; Konsentrasi Larutan</div>' +
+        '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">' +
+          '<div class="p-3 rounded-xl bg-slate-50 border border-brand-border"><span class="text-brand-muted block">Konsentrasi Larutan Standar</span><strong>' + escapeHtml(r.Konsentrasi_Standar) + '</strong></div>' +
+          '<div class="p-3 rounded-xl bg-blue-50 border border-blue-200"><span class="text-brand-primary block font-semibold">Konsentrasi Larutan Trial (Diuji)</span><strong class="text-brand-primary text-sm">' + escapeHtml(r.Konsentrasi_Trial) + '</strong></div>' +
+        '</div>' +
+        (r.Parameter_Proses_Lain ? '<div class="p-3 rounded-xl bg-slate-50 border border-brand-border text-xs"><strong>Parameter Pendukung:</strong> ' + escapeHtml(r.Parameter_Proses_Lain) + '</div>' : '') +
+      '</div>' +
+
+      '<div class="space-y-3">' +
+        '<div class="text-xs font-bold uppercase tracking-wider text-brand-primary">Hasil Inspeksi Visual (OK &amp; NG)</div>' +
+        '<div class="grid grid-cols-3 gap-2 text-center">' +
+          '<div class="p-3 rounded-xl bg-emerald-50 border border-emerald-200"><div class="text-[11px] font-semibold text-emerald-700">Visual OK</div><div class="font-mono text-lg font-bold text-emerald-700">' + r.Qty_OK + ' pcs</div></div>' +
+          '<div class="p-3 rounded-xl bg-red-50 border border-red-200"><div class="text-[11px] font-semibold text-red-700">Visual NG</div><div class="font-mono text-lg font-bold text-red-700">' + r.Qty_NG + ' pcs</div></div>' +
+          '<div class="p-3 rounded-xl bg-blue-50 border border-blue-200"><div class="text-[11px] font-semibold text-brand-primary">OK Rate</div><div class="font-mono text-lg font-bold text-brand-primary">' + okPct + '%</div></div>' +
+        '</div>' +
+        '<div class="flex flex-col sm:flex-row gap-4 items-start p-3.5 rounded-xl border border-brand-border">' +
+          '<div class="flex-1 text-xs space-y-1"><strong>Catatan Inspeksi Visual:</strong><p class="text-brand-muted whitespace-pre-line">' + escapeHtml(r.Catatan_Visual || '-') + '</p></div>' +
+          (r.Foto_Bukti_URL ? '<img src="' + escapeHtml(r.Foto_Bukti_URL) + '" onclick="openLightbox(\'' + escapeHtml(r.Foto_Bukti_URL) + '\')" class="w-28 h-28 rounded-xl object-cover border border-slate-200 cursor-pointer shrink-0" />' : '') +
+        '</div>' +
+      '</div>' +
+
+      '<div class="p-4 rounded-xl border ' + badgeColor + ' space-y-2 text-xs">' +
+        '<div class="font-bold text-sm">Keputusan Trial: ' + escapeHtml(r.Status_Keputusan) + '</div>' +
+        '<div><strong>Kesimpulan:</strong><p class="mt-0.5 whitespace-pre-line">' + escapeHtml(r.Kesimpulan_Trial) + '</p></div>' +
+        (r.Next_Trial_Plan ? '<div class="pt-2 border-t border-black/10"><strong>Next Trial / Tindak Lanjut:</strong><p class="mt-0.5 whitespace-pre-line">' + escapeHtml(r.Next_Trial_Plan) + '</p></div>' : '') +
+      '</div>';
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+/* ============================================================================
+ * 11. MASTER CHECKLIST TEMPLATES (ADMIN)
+ * ============================================================================ */
+
+async function loadTemplates() {
+  const container = document.getElementById('templates-list-container');
+  container.innerHTML = '<div class="col-span-full bg-white p-6 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Memuat master template...</div>';
+  try {
+    const res = await callApi('getAuditTemplates', {});
+    AppState.templates = res.data || [];
+    const isAdmin = AppState.user.Role === 'Admin';
+
+    container.innerHTML = AppState.templates.map(function(t) {
+      return '<div class="bg-white p-4 rounded-2xl border border-brand-border shadow-xs flex flex-col justify-between gap-3">' +
+        '<div>' +
+          '<div class="flex items-center justify-between mb-1.5">' +
+            '<span class="font-mono text-xs font-bold text-brand-primary">' + escapeHtml(t.Kode_Dokumen) + '</span>' +
+            '<span class="text-xs font-semibold px-2 py-0.5 rounded bg-blue-50 text-brand-primary">' + t.Total_Items + ' Item</span>' +
+          '</div>' +
+          '<h3 class="font-bold text-base text-brand-text">' + escapeHtml(t.Nama_Checklist) + '</h3>' +
+          '<p class="text-xs text-brand-muted mt-1">' + escapeHtml(t.Deskripsi) + '</p>' +
+        '</div>' +
+        '<div class="pt-3 border-t border-slate-100 flex justify-end gap-2">' +
+          (isAdmin ? '<button onclick="openTemplateEditorModal(\'' + escapeHtml(t.Template_ID) + '\')" class="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-blue-50 text-brand-primary text-xs font-semibold">Edit Pertanyaan</button>' : '') +
+        '</div>' +
+      '</div>';
+    }).join('');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function openTemplateEditorModal(templateId) {
+  let existing = { Template_ID: '', Kode_Dokumen: '', Nama_Checklist: '', Kategori_Audit: 'Internal Quality', Deskripsi: '', items: [] };
+  if (templateId) {
+    const res = await callApi('getTemplateDetail', { Template_ID: templateId });
+    existing = res.data;
+  } else {
+    existing.items = [{ Klausul_Ref: '', Pertanyaan_Audit: '', Panduan_Kriteria: '', Wajib_Foto: false, Bobot_Skor: 1 }];
+  }
+
+  function buildItemRowHtml(it, idx) {
+    return '<div class="tmpl-item-row p-3 rounded-xl bg-slate-50 border border-brand-border space-y-2">' +
+      '<div class="flex items-center justify-between">' +
+        '<span class="font-mono text-xs font-bold text-brand-primary">Item #' + (idx + 1) + '</span>' +
+        '<button type="button" onclick="this.closest(\'.tmpl-item-row\').remove()" class="text-xs text-red-600 font-semibold">Hapus</button>' +
+      '</div>' +
+      '<div class="grid grid-cols-2 gap-2">' +
+        '<input type="text" class="itm-klausul px-2.5 py-1.5 rounded-lg border border-brand-border text-xs" placeholder="Klausul (misal ISO 9001)" value="' + escapeHtml(it.Klausul_Ref || '') + '" />' +
+        '<input type="number" class="itm-bobot px-2.5 py-1.5 rounded-lg border border-brand-border text-xs" min="1" max="10" value="' + (it.Bobot_Skor || 1) + '" />' +
+      '</div>' +
+      '<textarea rows="2" class="itm-pertanyaan w-full px-2.5 py-1.5 rounded-lg border border-brand-border text-xs" required placeholder="Pertanyaan checklist audit...">' + escapeHtml(it.Pertanyaan_Audit || '') + '</textarea>' +
+      '<input type="text" class="itm-panduan w-full px-2.5 py-1.5 rounded-lg border border-brand-border text-xs" placeholder="Panduan kriteria OK/NG..." value="' + escapeHtml(it.Panduan_Kriteria || '') + '" />' +
+      '<label class="flex items-center gap-2 text-xs font-medium text-brand-text">' +
+        '<input type="checkbox" class="itm-foto rounded"' + (it.Wajib_Foto ? ' checked' : '') + ' />' +
+        '<span>Wajib lampirkan foto bukti</span>' +
+      '</label>' +
+    '</div>';
+  }
+
+  openModal(templateId ? 'Edit Master Template' : 'Buat Master Template Baru',
+    '<form id="template-editor-form" class="space-y-3">' +
+      '<div class="grid grid-cols-2 gap-2">' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Kode Dokumen</label>' +
+        '<input type="text" id="tpl-kode" value="' + escapeHtml(existing.Kode_Dokumen) + '" placeholder="FRM-AUD-02" class="w-full px-3 py-2 rounded-xl border border-brand-border text-xs" /></div>' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Kategori</label>' +
+        '<input type="text" id="tpl-kat" value="' + escapeHtml(existing.Kategori_Audit) + '" class="w-full px-3 py-2 rounded-xl border border-brand-border text-xs" /></div>' +
+      '</div>' +
+      '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Nama Checklist *</label>' +
+      '<input type="text" id="tpl-nama" required value="' + escapeHtml(existing.Nama_Checklist) + '" class="w-full px-3 py-2 rounded-xl border border-brand-border text-sm" /></div>' +
+      '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Deskripsi</label>' +
+      '<input type="text" id="tpl-desc" value="' + escapeHtml(existing.Deskripsi) + '" class="w-full px-3 py-2 rounded-xl border border-brand-border text-xs" /></div>' +
+      '<div class="flex items-center justify-between pt-2">' +
+        '<span class="text-xs font-bold text-brand-text">Daftar Butir Pertanyaan</span>' +
+        '<button type="button" id="add-tmpl-item-btn" class="text-xs font-semibold text-brand-accent">+ Tambah Item</button>' +
+      '</div>' +
+      '<div id="tmpl-items-wrapper" class="space-y-2.5">' +
+        existing.items.map(buildItemRowHtml).join('') +
+      '</div>' +
+      '<button type="submit" class="w-full touch-target bg-brand-accent text-white font-semibold rounded-xl text-sm">Simpan Master Template</button>' +
+    '</form>'
+  );
+
+  document.getElementById('add-tmpl-item-btn').addEventListener('click', function() {
+    const wrapper = document.getElementById('tmpl-items-wrapper');
+    const count = wrapper.querySelectorAll('.tmpl-item-row').length;
+    wrapper.insertAdjacentHTML('beforeend', buildItemRowHtml({ Wajib_Foto: false, Bobot_Skor: 1 }, count));
+  });
+
+  document.getElementById('template-editor-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const itemNodes = document.querySelectorAll('#tmpl-items-wrapper .tmpl-item-row');
+    const items = Array.from(itemNodes).map(function(node) {
+      return {
+        Klausul_Ref: node.querySelector('.itm-klausul').value,
+        Bobot_Skor: Number(node.querySelector('.itm-bobot').value || 1),
+        Pertanyaan_Audit: node.querySelector('.itm-pertanyaan').value,
+        Panduan_Kriteria: node.querySelector('.itm-panduan').value,
+        Wajib_Foto: node.querySelector('.itm-foto').checked
+      };
+    });
+
+    try {
+      const res = await callApi('saveAuditTemplate', {
+        Template_ID: existing.Template_ID,
+        Kode_Dokumen: document.getElementById('tpl-kode').value,
+        Kategori_Audit: document.getElementById('tpl-kat').value,
+        Nama_Checklist: document.getElementById('tpl-nama').value,
+        Deskripsi: document.getElementById('tpl-desc').value,
+        items: items
+      });
+      closeModal();
+      showToast(res.message, 'success');
+      loadTemplates();
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  });
+}
+
+/* ============================================================================
+ * 12. SETTINGS, ADMIN USERS & LOGS
+ * ============================================================================ */
+
+async function loadSettingsData() {
+  if (AppState.user.Role !== 'Admin') return;
+
+  try {
+    const [uRes, lRes] = await Promise.all([
+      callApi('getUsers', {}),
+      callApi('getActivityLogs', {})
+    ]);
+
+    const users = uRes.data || [];
+    document.getElementById('users-list-container').innerHTML = users.map(function(u) {
+      return '<div class="p-3 rounded-xl border border-brand-border flex items-center justify-between gap-2">' +
+        '<div>' +
+          '<div class="font-bold text-sm text-brand-text">' + escapeHtml(u.Nama_Lengkap) + ' <span class="font-mono text-xs text-brand-muted">(@' + escapeHtml(u.Username) + ')</span></div>' +
+          '<div class="text-xs text-brand-muted">' + escapeHtml(u.Role) + ' • ' + escapeHtml(u.Departemen) + ' • ' + (u.Status_Aktif ? 'Aktif' : 'Nonaktif') + '</div>' +
+        '</div>' +
+        '<button onclick=\'openUserModal(' + JSON.stringify(u) + ')\' class="px-3 py-1.5 rounded-lg bg-slate-100 text-xs font-semibold">Edit</button>' +
+      '</div>';
+    }).join('');
+
+    const logs = lRes.data || [];
+    document.getElementById('logs-list-container').innerHTML = logs.map(function(l) {
+      return '<div class="p-2.5 rounded-lg bg-slate-50 border border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-1">' +
+        '<div><span class="font-mono font-bold text-brand-primary">[' + escapeHtml(l.Action_Type) + ']</span> <strong>' + escapeHtml(l.User_Nama) + '</strong>: ' + escapeHtml(l.Detail_Aktivitas) + '</div>' +
+        '<div class="font-mono text-[10px] text-brand-muted">' + escapeHtml(l.Timestamp) + '</div>' +
+      '</div>';
+    }).join('');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function openUserModal(existingUser) {
+  const u = existingUser || { User_ID: '', Username: '', Nama_Lengkap: '', Role: 'Auditor', Departemen: '', Status_Aktif: true };
+
+  openModal(u.User_ID ? 'Edit Pengguna' : 'Tambah Pengguna Baru',
+    '<form id="admin-user-form" class="space-y-3">' +
+      '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Nama Lengkap *</label>' +
+      '<input type="text" id="usr-nama" required value="' + escapeHtml(u.Nama_Lengkap) + '" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+      '<div class="grid grid-cols-2 gap-3">' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Username *</label>' +
+        '<input type="text" id="usr-username" required value="' + escapeHtml(u.Username) + '" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Role *</label>' +
+        '<select id="usr-role" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm">' +
+          ['Admin', 'Auditor', 'Auditee'].map(function(r) {
+            return '<option value="' + r + '"' + (u.Role === r ? ' selected' : '') + '>' + r + '</option>';
+          }).join('') +
+        '</select></div>' +
+      '</div>' +
+      '<div class="grid grid-cols-2 gap-3">' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Departemen</label>' +
+        '<input type="text" id="usr-dept" value="' + escapeHtml(u.Departemen) + '" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+        '<div><label class="block text-xs font-semibold text-brand-muted mb-1">' + (u.User_ID ? 'Reset Password (Opsional)' : 'Password *') + '</label>' +
+        '<input type="password" id="usr-pass" ' + (u.User_ID ? '' : 'required minlength="6"') + ' placeholder="Min. 6 karakter" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+      '</div>' +
+      (u.User_ID ? '<label class="flex items-center gap-2 text-xs font-semibold"><input type="checkbox" id="usr-aktif"' + (u.Status_Aktif ? ' checked' : '') + ' /> Akun Aktif</label>' : '') +
+      '<button type="submit" class="w-full touch-target bg-brand-accent text-white font-semibold rounded-xl text-sm">Simpan Pengguna</button>' +
+    '</form>'
+  );
+
+  document.getElementById('admin-user-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    try {
+      const res = await callApi('saveUser', {
+        User_ID: u.User_ID,
+        Nama_Lengkap: document.getElementById('usr-nama').value,
+        Username: document.getElementById('usr-username').value,
+        Role: document.getElementById('usr-role').value,
+        Departemen: document.getElementById('usr-dept').value,
+        Password: document.getElementById('usr-pass').value,
+        Status_Aktif: u.User_ID ? document.getElementById('usr-aktif').checked : true
+      });
+      closeModal();
+      showToast(res.message, 'success');
+      loadSettingsData();
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  });
+}
+
+/* ============================================================================
+ * 13. MODAL & LIGHTBOX HELPERS
+ * ============================================================================ */
+
+function openModal(title, bodyHtml) {
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-body').innerHTML = bodyHtml;
+  document.getElementById('modal-backdrop').classList.remove('hidden');
+  lucide.createIcons();
+}
+
+function closeModal() {
+  document.getElementById('modal-backdrop').classList.add('hidden');
+  document.getElementById('modal-body').innerHTML = '';
+}
+
+function openLightbox(url) {
+  document.getElementById('lightbox-img').src = url;
+  document.getElementById('lightbox-modal').classList.remove('hidden');
+}
+
+function closeLightbox() {
+  document.getElementById('lightbox-modal').classList.add('hidden');
+  document.getElementById('lightbox-img').src = '';
 }
