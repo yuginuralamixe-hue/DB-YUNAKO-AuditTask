@@ -226,10 +226,12 @@ function enterAppShell() {
     el.classList.toggle('hidden', !isAuditee);
   });
 
-  const navTemplatesEl = document.getElementById('nav-templates-desktop');
-  if (navTemplatesEl) {
-    navTemplatesEl.classList.toggle('hidden', isAuditee);
-  }
+  // Sembunyikan seluruh tombol menu navigasi selain Audit & Activity Trial untuk role Auditee
+  document.querySelectorAll('.nav-link[data-route]').forEach(function(btn) {
+    const r = btn.getAttribute('data-route');
+    const hideForAuditee = isAuditee && r !== 'audit' && r !== 'trials';
+    btn.classList.toggle('hidden', hideForAuditee);
+  });
 
   // Arahkan Auditee langsung ke Audit Center, sementara Admin & Auditor ke Dashboard
   navigateTo(isAuditee ? 'audit' : 'dashboard');
@@ -289,16 +291,20 @@ function navigateTo(route) {
   if (route === 'audit-execute' || route === 'audit-report') activeRoute = 'audit';
   if (route === 'trial-form' || route === 'trial-report') activeRoute = 'trials';
 
+  // Gunakan classList.toggle agar class .hidden dan .non-auditee tidak tertimpa
   document.querySelectorAll('#desktop-nav .nav-link').forEach(function(btn) {
     const isMatch = btn.getAttribute('data-route') === activeRoute;
-    btn.className = 'nav-link w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition ' +
-      (isMatch ? 'bg-brand-accent text-white shadow-xs' : 'text-blue-100 hover:bg-white/10');
+    btn.classList.toggle('bg-brand-accent', isMatch);
+    btn.classList.toggle('text-white', isMatch);
+    btn.classList.toggle('shadow-xs', isMatch);
+    btn.classList.toggle('text-blue-100', !isMatch);
+    btn.classList.toggle('hover:bg-white/10', !isMatch);
   });
 
   document.querySelectorAll('#mobile-bottom-nav .nav-link').forEach(function(btn) {
     const isMatch = btn.getAttribute('data-route') === activeRoute;
-    btn.className = 'nav-link flex flex-col items-center justify-center gap-1 text-[10px] font-semibold ' +
-      (isMatch ? 'text-brand-accent' : 'text-slate-400');
+    btn.classList.toggle('text-brand-accent', isMatch);
+    btn.classList.toggle('text-slate-400', !isMatch);
   });
 
   const titles = {
