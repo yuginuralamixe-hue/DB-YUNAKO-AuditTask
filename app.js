@@ -1,12 +1,23 @@
 /**
  * ============================================================================
- * YUNAKO AUDIT & TASK HUB - APP.JS (UPDATED WITH ACTIVITY TRIAL REPORT)
+ * YUNAKO AUDIT & TASK HUB - APP.JS (NATIVE AUDITEE RBAC + ACTIVITY TRIAL)
  * Frontend PWA Controller (In-Memory State, GAS API Client, Image Compressor)
  * ============================================================================
  */
 
 // GANTI URL DI BAWAH INI DENGAN URL WEB APP GOOGLE APPS SCRIPT ANDA (.../exec)
 const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbx0mlXgYPulfBSUajkdR2zlzzce1MUlCcawzBf8Ize6PwP-PoyaxDkBYjYAbk5JNiU/exec';
+
+// Daftar rute dan endpoint API yang diizinkan untuk role Auditee (Read-Only)
+const AUDITEE_ALLOWED_ROUTES = ['audit', 'audit-report', 'trials', 'trial-report'];
+const AUDITEE_ALLOWED_ACTIONS = [
+  'login',
+  'logout',
+  'getAuditSessions',
+  'getAuditSessionDetail',
+  'getTrialReports',
+  'getTrialReportDetail'
+];
 
 // State Aplikasi di Memori Browser (Tanpa localStorage / sessionStorage / IndexedDB)
 const AppState = {
@@ -30,6 +41,10 @@ const AppState = {
   trialPendingPhotoBase64: null
 };
 
+function isAuditeeUser() {
+  return Boolean(AppState.user && String(AppState.user.Role || '').trim().toLowerCase() === 'auditee');
+}
+
 /* ============================================================================
  * 1. INISIALISASI & SERVICE WORKER PWA
  * ============================================================================ */
@@ -51,6 +66,12 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('toggle-password-btn').addEventListener('click', togglePasswordVisibility);
   document.getElementById('logout-btn-desktop').addEventListener('click', handleLogout);
   document.getElementById('logout-btn-mobile').addEventListener('click', handleLogout);
+
+  const mobileAuditeeLogoutBtn = document.getElementById('logout-btn-mobile-auditee');
+  if (mobileAuditeeLogoutBtn) {
+    mobileAuditeeLogoutBtn.addEventListener('click', handleLogout);
+  }
+
   document.getElementById('change-password-form').addEventListener('submit', handleChangePasswordSubmit);
   document.getElementById('trial-report-form').addEventListener('submit', handleTrialFormSubmit);
 
@@ -69,6 +90,11 @@ document.addEventListener('DOMContentLoaded', function() {
 async function callApi(action, payload) {
   if (GAS_WEB_APP_URL.indexOf('PASTE_YOUR') > -1) {
     throw new Error('URL Google Apps Script belum dikonfigurasi di app.js');
+  }
+
+  // Blokir pemanggilan API di luar modul Audit & Activity Trial untuk role Auditee
+  if (isAuditeeUser() && AUDITEE_ALLOWED_ACTIONS.indexOf(action) === -1) {
+    throw new Error('Akses dibatasi: Role Auditee hanya memiliki akses lihat pada Audit Center dan Activity Trial.');
   }
 
   const response = await fetch(GAS_WEB_APP_URL, {
@@ -172,6 +198,11 @@ function enterAppShell() {
   document.getElementById('app-shell').classList.remove('hidden');
 
   const u = AppState.user;
+  const isAuditee = isAuditeeUser();
+
+  // Terapkan class role-auditee pada body untuk penyesuaian layout & navigasi mobile 2 kolom
+  document.body.classList.toggle('role-auditee', isAuditee);
+
   document.getElementById('sidebar-user-avatar').textContent = u.Nama_Lengkap.charAt(0).toUpperCase();
   document.getElementById('sidebar-user-name').textContent = u.Nama_Lengkap;
   document.getElementById('sidebar-user-role').textContent = u.Role + ' • ' + u.Departemen;
@@ -182,22 +213,30 @@ function enterAppShell() {
   document.getElementById('prof-role').textContent = u.Role;
   document.getElementById('prof-dept').textContent = u.Departemen;
 
-  document.querySelectorAll('.admin-only').forEach(function(el) {
+  document.querySelectorAll('.admin-only:not(.page-view)').forEach(function(el) {
     el.classList.toggle('hidden', u.Role !== 'Admin');
   });
-  document.querySelectorAll('.auditor-only').forEach(function(el) {
-    el.classList.toggle('hidden', u.Role === 'Auditee');
+  document.querySelectorAll('.auditor-only:not(.page-view)').forEach(function(el) {
+    el.classList.toggle('hidden', isAuditee);
   });
-  if (u.Role === 'Auditee') {
-    document.getElementById('nav-templates-desktop').classList.add('hidden');
-  } else {
-    document.getElementById('nav-templates-desktop').classList.remove('hidden');
+  document.querySelectorAll('.non-auditee:not(.page-view)').forEach(function(el) {
+    el.classList.toggle('hidden', isAuditee);
+  });
+  document.querySelectorAll('.auditee-only:not(.page-view)').forEach(function(el) {
+    el.classList.toggle('hidden', !isAuditee);
+  });
+
+  const navTemplatesEl = document.getElementById('nav-templates-desktop');
+  if (navTemplatesEl) {
+    navTemplatesEl.classList.toggle('hidden', isAuditee);
   }
 
-  navigateTo('dashboard');
+  // Arahkan Auditee langsung ke Audit Center, sementara Admin & Auditor ke Dashboard
+  navigateTo(isAuditee ? 'audit' : 'dashboard');
 }
 
 function showLoginScreen() {
+  document.body.classList.remove('role-auditee');
   document.getElementById('app-shell').classList.add('hidden');
   document.getElementById('login-view').classList.remove('hidden');
 }
@@ -230,6 +269,11 @@ async function handleChangePasswordSubmit(e) {
  * ============================================================================ */
 
 function navigateTo(route) {
+  // Paksa rute Auditee tetap berada di dalam Audit Center atau Activity Trial Report
+  if (isAuditeeUser() && AUDITEE_ALLOWED_ROUTES.indexOf(route) === -1) {
+    route = 'audit';
+  }
+
   AppState.currentRoute = route;
 
   document.querySelectorAll('.page-view').forEach(function(sec) {
@@ -289,6 +333,8 @@ function navigateTo(route) {
  * ============================================================================ */
 
 async function loadDashboard() {
+  if (isAuditeeUser()) return;
+
   document.getElementById('dash-greeting').textContent = 'Halo, ' + AppState.user.Nama_Lengkap;
   document.getElementById('dash-date').textContent = new Date().toLocaleDateString('id-ID', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
@@ -310,7 +356,7 @@ async function loadDashboard() {
       schEl.innerHTML = '<div class="text-center py-6 text-xs text-brand-muted">Tidak ada agenda terjadwal hari ini.</div>';
     } else {
       schEl.innerHTML = d.todaySchedules.map(function(s) {
-        const isAudit = s.Kategori === 'Audit Terjadwal' && AppState.user.Role !== 'Auditee';
+        const isAudit = s.Kategori === 'Audit Terjadwal' && !isAuditeeUser();
         return '<div class="p-3 rounded-xl border border-brand-border bg-slate-50/70 flex items-center justify-between gap-3">' +
           '<div class="min-w-0">' +
             '<div class="flex items-center gap-2 mb-1">' +
@@ -354,6 +400,8 @@ async function loadDashboard() {
  * ============================================================================ */
 
 async function loadSchedules() {
+  if (isAuditeeUser()) return;
+
   const container = document.getElementById('schedule-list-container');
   container.innerHTML = '<div class="bg-white p-6 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Memuat jadwal...</div>';
   try {
@@ -401,7 +449,7 @@ function renderSchedules() {
     listEl.innerHTML = filtered.map(function(s) {
       const isAudit = s.Kategori === 'Audit Terjadwal';
       const borderClass = isAudit ? 'border-l-4 border-l-brand-accent' : 'border-l-4 border-l-emerald-500';
-      const canEdit = AppState.user.Role !== 'Auditee';
+      const canEdit = !isAuditeeUser();
       return '<div class="bg-white p-4 rounded-2xl border border-brand-border ' + borderClass + ' shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">' +
         '<div class="space-y-1">' +
           '<div class="flex flex-wrap items-center gap-2">' +
@@ -450,6 +498,8 @@ function renderSchedules() {
 }
 
 function openScheduleModal() {
+  if (isAuditeeUser()) return;
+
   const today = new Date().toISOString().slice(0, 10);
   const userOptions = AppState.usersList.map(function(u) {
     return '<option value="' + escapeHtml(u.User_ID) + '">' + escapeHtml(u.Nama_Lengkap) + ' (' + u.Role + ')</option>';
@@ -478,7 +528,7 @@ function openScheduleModal() {
       '</div>' +
       '<div class="grid grid-cols-2 gap-3">' +
         '<div><label class="block text-xs font-semibold text-brand-muted mb-1">Lokasi / Area Audit</label>' +
-        '<input type="text" id="sch-lokasi" placeholder="Plant 1 / Lab Inspeksi" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
+        '<input type="text" id="sch-lokasi" placeholder="Plant 1 / Lab Inspeksi" class="w-full px-3.5 py-2.5 rounded-xl border border-brand-border text-sm" /></div>' +
         '<div><label class="block text-xs font-semibold text-brand-muted mb-1">PIC</label>' +
         '<select id="sch-pic" class="w-full px-3 py-2.5 rounded-xl border border-brand-border text-sm">' + userOptions + '</select></div>' +
       '</div>' +
@@ -511,6 +561,7 @@ function openScheduleModal() {
 }
 
 async function deleteScheduleItem(scheduleId) {
+  if (isAuditeeUser()) return;
   if (!confirm('Hapus jadwal ini?')) return;
   try {
     const res = await callApi('deleteSchedule', { Schedule_ID: scheduleId });
@@ -526,6 +577,8 @@ async function deleteScheduleItem(scheduleId) {
  * ============================================================================ */
 
 async function loadTasks() {
+  if (isAuditeeUser()) return;
+
   const container = document.getElementById('tasks-list-container');
   container.innerHTML = '<div class="col-span-full bg-white p-6 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Memuat daftar tugas...</div>';
   try {
@@ -597,6 +650,8 @@ function renderTasks() {
 }
 
 function openTaskModal() {
+  if (isAuditeeUser()) return;
+
   const nextWeek = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
   const userOptions = AppState.usersList.map(function(u) {
     return '<option value="' + escapeHtml(u.User_ID) + '">' + escapeHtml(u.Nama_Lengkap) + ' (' + u.Role + ')</option>';
@@ -645,6 +700,8 @@ function openTaskModal() {
 }
 
 function openTaskProgressModal(taskId) {
+  if (isAuditeeUser()) return;
+
   const t = AppState.tasks.find(function(item) { return item.Task_ID === taskId; });
   if (!t) return;
 
@@ -718,13 +775,16 @@ function renderAuditSessions() {
 
   const container = document.getElementById('audit-sessions-container');
   if (filtered.length === 0) {
-    container.innerHTML = '<div class="col-span-full bg-white p-8 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Belum ada sesi audit. Klik "Mulai Audit Baru" untuk memulai pemeriksaan di HP.</div>';
+    const emptyMsg = isAuditeeUser()
+      ? 'Belum ada sesi audit yang tersedia untuk dilihat.'
+      : 'Belum ada sesi audit. Klik "Mulai Audit Baru" untuk memulai pemeriksaan di HP.';
+    container.innerHTML = '<div class="col-span-full bg-white p-8 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">' + emptyMsg + '</div>';
     return;
   }
 
   container.innerHTML = filtered.map(function(s) {
     const isDraft = s.Status_Audit === 'Draft';
-    const canExecute = isDraft && AppState.user.Role !== 'Auditee';
+    const canExecute = isDraft && !isAuditeeUser();
     const badgeClass = isDraft ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700';
 
     return '<div class="bg-white p-4 rounded-2xl border border-brand-border shadow-xs flex flex-col justify-between gap-3">' +
@@ -750,6 +810,8 @@ function renderAuditSessions() {
 }
 
 async function openNewAuditModal(presetScheduleId, presetArea) {
+  if (isAuditeeUser()) return;
+
   try {
     if (AppState.templates.length === 0) {
       const tRes = await callApi('getAuditTemplates', {});
@@ -814,6 +876,11 @@ async function openNewAuditModal(presetScheduleId, presetArea) {
 }
 
 async function openAuditExecution(auditId) {
+  if (isAuditeeUser()) {
+    openAuditReport(auditId);
+    return;
+  }
+
   navigateTo('audit-execute');
   const container = document.getElementById('exec-items-container');
   container.innerHTML = '<div class="bg-white p-6 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Memuat lembar checklist audit...</div>';
@@ -923,6 +990,8 @@ function renderPhotoBoxHtml(ans) {
 }
 
 async function selectAuditOption(itemId, status) {
+  if (isAuditeeUser()) return;
+
   const s = AppState.activeAuditDetail;
   const ans = s.answers.find(function(a) { return a.Item_ID === itemId; });
   if (!ans) return;
@@ -946,6 +1015,8 @@ async function selectAuditOption(itemId, status) {
 }
 
 async function saveItemNote(itemId) {
+  if (isAuditeeUser()) return;
+
   const s = AppState.activeAuditDetail;
   const ans = s.answers.find(function(a) { return a.Item_ID === itemId; });
   const noteEl = document.getElementById('note-' + itemId);
@@ -995,6 +1066,8 @@ function compressImageFile(file, maxWidth, quality) {
 }
 
 async function handleAuditPhotoInput(itemId, inputEl) {
+  if (isAuditeeUser()) return;
+
   const file = inputEl.files && inputEl.files[0];
   if (!file) return;
 
@@ -1028,6 +1101,8 @@ async function handleAuditPhotoInput(itemId, inputEl) {
 }
 
 async function submitCurrentAudit() {
+  if (isAuditeeUser()) return;
+
   const s = AppState.activeAuditDetail;
   if (!s) return;
 
@@ -1125,7 +1200,7 @@ async function openAuditReport(auditId) {
 }
 
 /* ============================================================================
- * 10. MODUL ACTIVITY TRIAL REPORT (FITUR BARU)
+ * 10. MODUL ACTIVITY TRIAL REPORT
  * ============================================================================ */
 
 async function loadTrialReports() {
@@ -1151,7 +1226,10 @@ function renderTrialsList() {
 
   const container = document.getElementById('trials-list-container');
   if (filtered.length === 0) {
-    container.innerHTML = '<div class="col-span-full bg-white p-8 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Belum ada laporan trial. Klik <strong>Buat Laporan Trial</strong> untuk mendokumentasikan aktivitas trial Anda.</div>';
+    const emptyMsg = isAuditeeUser()
+      ? 'Belum ada laporan Activity Trial yang tersedia untuk dilihat.'
+      : 'Belum ada laporan trial. Klik <strong>Buat Laporan Trial</strong> untuk mendokumentasikan aktivitas trial Anda.';
+    container.innerHTML = '<div class="col-span-full bg-white p-8 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">' + emptyMsg + '</div>';
     return;
   }
 
@@ -1188,6 +1266,8 @@ function renderTrialsList() {
 }
 
 function openTrialForm(existingTrial) {
+  if (isAuditeeUser()) return;
+
   navigateTo('trial-form');
   const today = new Date().toISOString().slice(0, 10);
   AppState.trialPendingPhotoBase64 = null;
@@ -1338,6 +1418,8 @@ async function previewSelectedTrialPhoto(inputEl) {
 
 async function handleTrialFormSubmit(e) {
   e.preventDefault();
+  if (isAuditeeUser()) return;
+
   const btn = document.getElementById('trl-submit-btn');
   btn.disabled = true;
   btn.textContent = 'Menyimpan Laporan Trial...';
@@ -1399,7 +1481,10 @@ async function openTrialReportView(trialId) {
     const r = res.data;
 
     const editBtn = document.getElementById('trl-report-edit-btn');
-    editBtn.onclick = function() { openTrialForm(r); };
+    if (editBtn) {
+      editBtn.classList.toggle('hidden', isAuditeeUser());
+      editBtn.onclick = function() { openTrialForm(r); };
+    }
 
     const total = Number(r.Qty_Trial || 0);
     const okPct = total > 0 ? Math.round((Number(r.Qty_OK || 0) / total) * 1000) / 10 : 0;
@@ -1487,6 +1572,8 @@ async function openTrialReportView(trialId) {
  * ============================================================================ */
 
 async function loadTemplates() {
+  if (isAuditeeUser()) return;
+
   const container = document.getElementById('templates-list-container');
   container.innerHTML = '<div class="col-span-full bg-white p-6 rounded-2xl border border-brand-border text-center text-sm text-brand-muted">Memuat master template...</div>';
   try {
@@ -1515,6 +1602,8 @@ async function loadTemplates() {
 }
 
 async function openTemplateEditorModal(templateId) {
+  if (isAuditeeUser()) return;
+
   let existing = { Template_ID: '', Kode_Dokumen: '', Nama_Checklist: '', Kategori_Audit: 'Internal Quality', Deskripsi: '', items: [] };
   if (templateId) {
     const res = await callApi('getTemplateDetail', { Template_ID: templateId });
@@ -1639,6 +1728,8 @@ async function loadSettingsData() {
 }
 
 function openUserModal(existingUser) {
+  if (AppState.user.Role !== 'Admin') return;
+
   const u = existingUser || { User_ID: '', Username: '', Nama_Lengkap: '', Role: 'Auditor', Departemen: '', Status_Aktif: true };
 
   openModal(u.User_ID ? 'Edit Pengguna' : 'Tambah Pengguna Baru',
